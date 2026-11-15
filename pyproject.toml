@@ -1,0 +1,20 @@
+[project]
+name = "osmosis"
+version = "0.1.0"
+description = "RPCS3 <-> Steam companion: library sync with full art, save/trophy backups, a Steam-style profile"
+requires-python = ">=3.11"
+dependencies = ["PyYAML", "tomli_w"]
+
+[project.scripts]
+osmosis-cli = "osmosis.cli:main"
+osmosis-watcher = "osmosis.watcher:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["osmosis*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

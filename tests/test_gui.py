@@ -22,6 +22,8 @@ def app():
 def test_theme_pages(app, tmp_path, theme, dark):
     from osmosis.gui import app as A
     cfg = make_rpcs3(tmp_path)
+    from test_lbp import add_lbp
+    add_lbp(cfg)
     st = make_steam(tmp_path, with_rpcs3_entry=True)
     con = db.connect(); db.add_session(con, "BLUS30443", 1.7e9, 1.7e9 + 3600, 3_600_000); con.close()
     s = config.Settings(rpcs3_config_dir=str(cfg), rpcs3_binary="/bin/true", theme=theme, dark=dark, sounds=False)
@@ -30,7 +32,7 @@ def test_theme_pages(app, tmp_path, theme, dark):
     w = A.Window()
     w.resize(1200, 800)
     w.show()
-    for i in range(5):
+    for i in range(6):
         w.go(i)
         app.processEvents()
         assert not w.grab().isNull()

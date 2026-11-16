@@ -46,7 +46,10 @@
           # wrapQtApp explicitly: the hook doesn't reliably wrap Python entry-point scripts.
           dontWrapQtApps = true;
           postFixup = ''
-            wrapQtApp "$out/bin/osmosis"
+            # pw-play/paplay play theme sounds; ffmpeg converts the PS3's menu music (ATRAC3)
+            # and preview videos (PAMF) for Ribbon.
+            wrapQtApp "$out/bin/osmosis" \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.pipewire pkgs.pulseaudio pkgs.ffmpeg ]}
           '';
 
           meta = {

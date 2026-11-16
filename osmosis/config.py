@@ -41,6 +41,8 @@ class SteamSettings:
     reopen_steam: bool = True
     remove_missing: bool = True             # drop shortcuts for games no longer in RPCS3
     fetch_art: bool = True
+    art_source: str = "game"                # "game" = the game's own art, exactly like RPCS3's Create Steam Shortcut;
+                                            # "steamgriddb" = SteamGridDB (falls back to the game's art)
     collection_tag: str = "PS3"
 
 
@@ -53,6 +55,8 @@ class Settings:
     dark: bool = True                       # for themes that have both variants
     sounds: bool = True
     ribbon_month_colors: bool = True
+    ribbon_media: bool = True               # game music (SND0) + preview video (ICON1) when an item is held
+    refresher_path: str = ""                # Refresher executable; empty = look on PATH / ~/Applications
     steam: SteamSettings = field(default_factory=SteamSettings)
     auto_export: AutoExport = field(default_factory=AutoExport)
 

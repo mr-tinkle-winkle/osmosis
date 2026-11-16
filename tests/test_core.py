@@ -216,6 +216,7 @@ def test_steam_sync(tmp_path):
     st = make_steam(tmp_path, with_rpcs3_entry=True)
     s = settings_for(cfg, st)
     s.steamgriddb_api_key = "x"
+    s.steam.art_source = "steamgriddb"
     p = load_profile(s)
     lib = steam.SteamLibrary.detect(s)
     games = [e.game for e in p.entries if e.game.kind != "iso"]
@@ -287,3 +288,22 @@ def test_watcher_sessions(tmp_path, monkeypatch):
 def test_watcher_cmdline_launch(tmp_path):
     from osmosis import watcher
     assert watcher.serial_from_cmdline('rpcs3 --no-gui %RPCS3_GAMEID%:BLUS30443') == "BLUS30443"
+
+
+def test_steam_sync_rpcs3_style_art(tmp_path):
+    """Default art = what RPCS3's Create Steam Shortcut makes from the game's own files."""
+    from PySide6.QtGui import QImage
+    cfg = make_rpcs3(tmp_path)
+    st = make_steam(tmp_path)
+    s = settings_for(cfg, st)
+    lib = steam.SteamLibrary.detect(s)
+    games = [e.game for e in load_profile(s).entries if e.game.kind != "iso"]
+    rep = lib.sync(games, "/run/current-system/sw/bin/rpcs3", s)
+    ds = lib.entries_by_serial()["BLUS30443"]
+    appid = int(ds["appid"]) & 0xFFFFFFFF
+    cover = QImage(str(lib.grid_dir / f"{appid}p.png"))
+    assert (cover.width(), cover.height()) == (600, 900)
+    pic1 = (cfg.parent / "games/Demons Souls/PS3_GAME/PIC1.PNG").read_bytes()
+    assert (lib.grid_dir / f"{appid}_hero.png").read_bytes() == pic1
+    assert (lib.grid_dir / f"{appid}.png").read_bytes() == pic1
+    assert all("game art" in x for x in rep.art["Demon's Souls"])

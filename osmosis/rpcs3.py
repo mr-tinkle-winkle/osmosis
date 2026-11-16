@@ -84,6 +84,16 @@ class Game:
                 return p
         return None
 
+    @property
+    def music(self) -> Path | None:
+        """SND0.AT3: the music the PS3 menu plays while the game is highlighted."""
+        return self._asset("SND0.AT3")
+
+    @property
+    def preview(self) -> Path | None:
+        """ICON1.PAM: the animated icon / b-roll the PS3 menu shows."""
+        return self._asset("ICON1.PAM")
+
     def _asset(self, name: str) -> Path | None:
         if self.sfo_dir:
             p = self.sfo_dir / name

@@ -21,7 +21,7 @@ BASE_WORDS = dict(
     profile="Profile", library="Library", steam="Steam Sync", backup="Backup", settings="Settings",
     export_all="Export All", export_data="Export Data", export_trophies="Export Trophies",
     import_="Restore", play="Play", sync="Sync now", trophies="Trophies", hours="hours",
-    recent="Recently played", timeline="Timeline", games="games",
+    recent="Recently played", timeline="Timeline", games="games", misc="Miscellaneous",
 )
 
 
@@ -123,7 +123,7 @@ _add(Theme(
     sounds="boilerworks",
     words=dict(profile="Engineer", library="Boiler Room", steam="Steam Lines", backup="Bottling", settings="Calibration",
                export_all="Bottle Everything", export_data="Bottle Data", export_trophies="Bottle Trophies",
-               import_="Uncork a Bottle", play="Fire Up", sync="Open the Valves", trophies="Pressure",
+               import_="Uncork a Bottle", misc="Workshop", play="Fire Up", sync="Open the Valves", trophies="Pressure",
                hours="hours on the clock", recent="Recently Fired", timeline="Pressure Log", games="engines"),
 ))
 _add(Theme(
@@ -135,7 +135,7 @@ _add(Theme(
     sounds="trophy_hall",
     words=dict(profile="The Collection", library="Exhibits", steam="Loans to Steam", backup="Archives", settings="Curator",
                export_all="Archive the Collection", export_data="Archive Records", export_trophies="Archive Honours",
-               import_="Restore from Archive", play="Visit", sync="Arrange Loans", trophies="Honours",
+               import_="Restore from Archive", misc="The Annex", play="Visit", sync="Arrange Loans", trophies="Honours",
                hours="hours in residence", recent="Recent Acquisitions", timeline="Gallery", games="works"),
 ))
 _add(Theme(
@@ -145,7 +145,7 @@ _add(Theme(
                 accent="#f0c98a", accent_text="#2a241f", track="#241e19", bar="#a5441f"),
     font_body="DM Sans", font_display="DM Serif Display", radius=4, backdrop="shelf", timeline="shelf", sounds="shelf",
     words=dict(profile="My Shelf", steam="Steam Shelf", backup="Storage", export_all="Box up everything",
-               export_data="Box up data", export_trophies="Box up trophies", import_="Unpack a box",
+               export_data="Box up data", export_trophies="Box up trophies", import_="Unpack a box", misc="Odds & Ends",
                sync="Restock Steam", recent="Pulled out lately", timeline="Chapters"),
 ))
 _add(Theme(
@@ -158,7 +158,7 @@ _add(Theme(
     sounds="summit",
     words=dict(profile="Climber", library="Range", steam="Basecamp Sync", backup="Caches", settings="Gear",
                export_all="Leave a full cache", export_data="Cache data", export_trophies="Cache trophies",
-               import_="Dig up a cache", play="Climb", sync="Radio basecamp", trophies="Waypoints",
+               import_="Dig up a cache", misc="Side Trails", play="Climb", sync="Radio basecamp", trophies="Waypoints",
                hours="hours on rock", recent="Recent ascents", timeline="The climb", games="routes"),
 ))
 _add(Theme(
@@ -171,7 +171,7 @@ _add(Theme(
     timeline="card_catalog", sounds="card_catalog",
     words=dict(profile="Patron", library="Holdings", steam="Interlibrary", backup="Stacks", settings="Circulation",
                export_all="File everything", export_data="File data", export_trophies="File trophies",
-               import_="Retrieve from file", play="Check out", sync="Send to Interlibrary", trophies="Stamps",
+               import_="Retrieve from file", misc="Special Collections", play="Check out", sync="Send to Interlibrary", trophies="Stamps",
                hours="hours on loan", recent="Recent loans", timeline="Loan history", games="volumes"),
 ))
 _add(Theme(
@@ -181,7 +181,7 @@ _add(Theme(
                 accent="#7dff9a", accent_text="#050a06", track="#0f2414"),
     font_body="JetBrains Mono", font_display="JetBrains Mono", radius=0, backdrop="terminal", timeline="terminal",
     sounds="terminal",
-    words=dict(profile="1:profile", library="2:library", steam="3:steam-sync", backup="4:backup", settings="5:config",
+    words=dict(profile="1:profile", library="2:library", steam="3:steam-sync", backup="4:backup", misc="5:misc", settings="6:config",
                export_all="[ export --all ]", export_data="[ export --data ]", export_trophies="[ export --trophies ]",
                import_="[ import ]", play="[ run ]", sync="[ sync ]", trophies="trophies", hours="h",
                recent="games --recent", timeline="git log", games="games"),

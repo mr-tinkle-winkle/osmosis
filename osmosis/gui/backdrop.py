@@ -45,6 +45,19 @@ class Backdrop(QWidget):
                          rnd.choice((-1, 1)) * rnd.uniform(0.004, 0.012), rnd.uniform(1.0, 2.4)) for _ in range(28)]
         self._base_color = QColor("#1d4fa3")
         self._base_checked = 0.0
+        self._ov: QPixmap | None = None
+        self._ov_scaled: QPixmap | None = None
+        self._ov_a = 0.0
+        self._ov_target = 0.0
+
+    def set_overlay(self, pm: QPixmap | None):
+        """Game background art (PIC1) faded in over the Ribbon's colour."""
+        if pm is not None and not pm.isNull():
+            self._ov, self._ov_scaled = pm, None
+            self._ov_a = min(self._ov_a, 0.15)
+            self._ov_target = 1.0
+        else:
+            self._ov_target = 0.0
 
     def set_theme(self, theme: Theme, month_colors: bool = True, animate: bool = True):
         self._theme = theme
@@ -234,6 +247,18 @@ class Backdrop(QWidget):
         glow.setColorAt(0, QColor(255, 255, 255, int(18 + 16 * math.sin(t * 0.45))))
         glow.setColorAt(1, QColor(255, 255, 255, 0))
         p.fillRect(self.rect(), glow)
+
+        self._ov_a += (self._ov_target - self._ov_a) * 0.08
+        if self._ov is not None and self._ov_a > 0.01:
+            if self._ov_scaled is None or self._ov_scaled.size() != self.size():
+                from .widgets import scaled_crop
+                self._ov_scaled = scaled_crop(self._ov, self.size())
+            p.setOpacity(self._ov_a)
+            p.drawPixmap(0, 0, self._ov_scaled)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 90))
+            p.setOpacity(1.0)
+        elif self._ov_target == 0.0 and self._ov_a <= 0.01:
+            self._ov, self._ov_scaled = None, None
 
         # soft sheets at 1/5 resolution, scaled up = blur
         sw, sh = max(1, w // 5), max(1, h // 5)

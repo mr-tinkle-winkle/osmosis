@@ -146,35 +146,63 @@ def sound_file(set_name: str, event: str) -> Path | None:
 
 
 class Player:
-    """Plays a theme's sounds through QSoundEffect; silently does nothing if Qt
-    Multimedia isn't available."""
+    """Plays a theme's sounds. Uses PipeWire's pw-play (or paplay) as a separate
+    process, which works on any PipeWire/Pulse desktop without Qt Multimedia's own
+    audio backend; falls back to QSoundEffect if neither tool is found."""
 
     def __init__(self):
+        import shutil
         self._effects = {}
         self.enabled = True
         self.set_name = ""
+        self._last = {}
+        self._cmd = None
+        for exe, args in (("pw-play", ["--volume", "0.7"]), ("paplay", [])):
+            path = shutil.which(exe)
+            if path:
+                self._cmd = [path, *args]
+                break
         try:
             from PySide6.QtMultimedia import QSoundEffect  # noqa: F401
-            self._ok = True
+            self._qt = True
         except Exception:
-            self._ok = False
+            self._qt = False
+        self.last_error = ""
 
     def play(self, event: str):
-        if not (self._ok and self.enabled and self.set_name):
+        import subprocess
+        import time
+        if not (self.enabled and self.set_name):
             return
-        key = (self.set_name, event)
-        eff = self._effects.get(key)
-        if eff is None:
+        now = time.monotonic()
+        if now - self._last.get(event, 0) < 0.06:   # don't stack identical clicks
+            return
+        self._last[event] = now
+        try:
+            f = sound_file(self.set_name, event)
+        except OSError as e:
+            self.last_error = str(e)
+            return
+        if not f:
+            return
+        if self._cmd:
+            try:
+                subprocess.Popen([*self._cmd, str(f)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return
+            except OSError as e:
+                self.last_error = str(e)
+        if self._qt:
             from PySide6.QtCore import QUrl
             from PySide6.QtMultimedia import QSoundEffect
-            f = sound_file(self.set_name, event)
-            if not f:
-                return
-            eff = QSoundEffect()
-            eff.setSource(QUrl.fromLocalFile(str(f)))
-            eff.setVolume(0.6)
-            self._effects[key] = eff
-        eff.play()
+            key = (self.set_name, event)
+            eff = self._effects.get(key)
+            if eff is None:
+                eff = QSoundEffect()
+                eff.setSource(QUrl.fromLocalFile(str(f)))
+                eff.setVolume(0.7)
+                self._effects[key] = eff
+            eff.play()
 
 
 PLAYER = Player()

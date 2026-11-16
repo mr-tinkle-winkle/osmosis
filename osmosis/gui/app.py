@@ -257,7 +257,14 @@ class Window(QMainWindow):
         self.backdrop.setLayout(root)
 
         pages = [("profile", self.page_profile), ("library", self.page_library), ("steam", self.page_steam),
-                 ("backup", self.page_backup), ("settings", self.page_settings)]
+                 ("backup", self.page_backup), ("misc", self.page_misc), ("settings", self.page_settings)]
+        self.n_pages = len(pages)
+        if getattr(self, "xmb", None) is not None:
+            try:
+                self.xmb.stop_media()
+            except RuntimeError:
+                pass
+        self.xmb = None
         nav = QFrame()
         nav.setObjectName("TopNav" if top else "Side")
         group = QButtonGroup(nav)
@@ -278,7 +285,7 @@ class Window(QMainWindow):
             nl.addWidget(brand)
             nl.addSpacing(22)
         for i, (key, _fn) in enumerate(pages):
-            b = QPushButton(t.w(key))
+            b = QPushButton(t.w(key).replace("&", "&&"))
             b.setObjectName("TopNav" if top else "Nav")
             if top:
                 from PySide6.QtGui import QFont, QFontMetrics
@@ -327,11 +334,15 @@ class Window(QMainWindow):
         self.page_index = i
         self.detail_serial = None
         self._check_nav(i)
-        if self.stack.count() > 5:
-            w = self.stack.widget(5)
+        self._drop_detail()
+        self.stack.setCurrentIndex(i)
+
+    def _drop_detail(self):
+        n = getattr(self, "n_pages", 6)
+        if self.stack.count() > n:
+            w = self.stack.widget(n)
             self.stack.removeWidget(w)
             w.deleteLater()
-        self.stack.setCurrentIndex(i)
 
     def _check_nav(self, i):
         for j, b in enumerate(getattr(self, "nav_buttons", [])):
@@ -342,12 +353,9 @@ class Window(QMainWindow):
         self.detail_serial = serial
         self.page_index = 1
         self._check_nav(1)
-        if self.stack.count() > 5:
-            w = self.stack.widget(5)
-            self.stack.removeWidget(w)
-            w.deleteLater()
+        self._drop_detail()
         self.stack.addWidget(self.page_game(serial))
-        self.stack.setCurrentIndex(5)
+        self.stack.setCurrentIndex(self.n_pages)
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -454,6 +462,16 @@ class Window(QMainWindow):
             self._no_rpcs3(lay)
             lay.addStretch(1)
             return scroll(inner)
+        if t.backdrop == "ribbon":
+            from .xmb import XmbList
+            ordered = sorted(p.entries, key=lambda e: e.last_activity or __import__("datetime").datetime.min, reverse=True)
+            self.xmb = XmbList(ordered, t, self.backdrop, self.settings)
+            self.xmb.open_game.connect(self.open_game)
+            holder = QWidget()
+            hl = QVBoxLayout(holder)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.addWidget(self.xmb)
+            return holder
         row = QHBoxLayout()
         search = QLineEdit()
         search.setPlaceholderText("Search games")
@@ -560,7 +578,7 @@ class Window(QMainWindow):
         for k, v in (("Steam", f"{lib.root}  (account {lib.user})" if lib else "not found"),
                      ("RPCS3 launcher", exe or "not found"),
                      ("In Steam", f"{synced} of {n_games} games"),
-                     ("Artwork", "SteamGridDB" if s.steamgriddb_api_key else "game's own PS3 art (add a SteamGridDB key in Settings for full art)")):
+                     ):
             r = QHBoxLayout()
             kl = W.label(k, t, 14, "muted")
             kl.setFixedWidth(150)
@@ -580,7 +598,18 @@ class Window(QMainWindow):
         chk("Close Steam automatically while syncing (Steam overwrites its shortcut list when it exits)", "close_steam")
         chk("Reopen Steam afterwards", "reopen_steam")
         chk("Remove shortcuts for games no longer in RPCS3", "remove_missing")
-        chk("Fetch library art (cover, banner, logo, icon)", "fetch_art")
+        chk("Add library art (cover, banner above the title, logo, icon)", "fetch_art")
+        ar = QHBoxLayout()
+        ar.addWidget(W.label("Artwork from", t, 14, "muted"))
+        src = QComboBox()
+        src.addItem("The game's own art — the same as RPCS3's “Create Steam Shortcut”", "game")
+        src.addItem("SteamGridDB (needs a free API key in Settings; falls back to the game's art)", "steamgriddb")
+        src.setCurrentIndex(0 if s.steam.art_source != "steamgriddb" else 1)
+        src.currentIndexChanged.connect(lambda _i: self._set_steam("art_source", src.currentData()))
+        ar.addWidget(src, 1)
+        opts.layout().addLayout(ar)
+        opts.layout().addWidget(W.label("Changed the art source? Use “Re-download all art” to redo existing shortcuts.",
+                                        t, 12, "muted", wrap=True))
         lay.addWidget(opts)
 
         row = QHBoxLayout()
@@ -803,6 +832,186 @@ class Window(QMainWindow):
 
         run_bg(self, work, done, lambda err: self.say(f"Restore failed: {err}", sound="error"))
 
+    # -- miscellaneous: LBP online ---------------------------------------------------------------------
+    def page_misc(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from .. import lbp
+        t = self.theme
+        inner, lay = self._page(t.w("misc"))
+        rp = self.profile.rpcs3 if self.profile else None
+        if not rp:
+            self._no_rpcs3(lay)
+            lay.addStretch(1)
+            return scroll(inner)
+        open_url = lambda u: QDesktopServices.openUrl(QUrl(u))
+        lay.addWidget(W.label("LittleBigPlanet online", t, 20, display=True, bold=True))
+        lay.addWidget(W.label("Play LBP 1–3 online on fan-run custom servers. osmosis handles RPCS3's network "
+                              "settings and switching servers; a few steps need you (marked below).", t, 14, "muted", wrap=True))
+
+        games = lbp.games(rp, [e.game for e in self.profile.entries])
+        net = lbp.net_status(rp)
+        pw_ok = lbp.patchwork_installed(rp)
+        server_key, server_url = lbp.current_server(rp)
+        patched = [g for g in games if g.patched]
+
+        def tick(ok):
+            return "✓" if ok else "○"
+
+        # -- status checklist -------------------------------------------------------------
+        st = W.Panel(pad=18, spacing=10)
+
+        def row(ok, title, detail, action=None, manual=False):
+            r = QHBoxLayout()
+            mark = W.label(tick(ok), t, 18, "accent" if ok else "muted", bold=True)
+            mark.setFixedWidth(26)
+            r.addWidget(mark, 0, Qt.AlignTop)
+            col = QVBoxLayout()
+            col.setSpacing(2)
+            head = title + ("   · you do this" if manual and not ok else "")
+            col.addWidget(W.label(head, t, 15, bold=True))
+            if detail:
+                col.addWidget(W.label(detail, t, 13, "muted", wrap=True))
+            r.addLayout(col, 1)
+            if action and not ok:
+                r.addWidget(action, 0, Qt.AlignTop)
+            st.layout().addLayout(r)
+
+        if games:
+            names = ", ".join(f"{g.game.title} ({g.serial})" for g in games)
+            missing = [g for g in games if not g.eboot]
+            row(not missing, "1. Game installed with its latest update",
+                names + (("\nNo update installed for: " + ", ".join(g.serial for g in missing) +
+                          ". Install it in RPCS3 with File → Install Packages/Raps/Edats — Refresher patches "
+                          "the copy in dev_hdd0/game.") if missing else ""), manual=True)
+        else:
+            row(False, "1. A LittleBigPlanet game", "No LittleBigPlanet game was found in RPCS3.", manual=True)
+
+        net_ok = net.internet and net.rpcn
+        row(net_ok, "2. RPCS3 network: Connected, PSN status RPCN",
+            "Done." if net_ok else "Sets Configuration → Network to Connected and PSN status to RPCN. "
+                                   "Close RPCS3 first; your config is backed up before it's changed.",
+            button(t, "Turn on", True, self._lbp_network))
+        row(bool(net.account), "3. RPCN account",
+            f"Signed in as {net.account}." if net.account else
+            "In RPCS3: Configuration → RPCN → Account → Create Account. Enter a username, password and email, "
+            "then paste the token RPCN emails you. osmosis can't do this one — it needs your email.", manual=True)
+        ref = lbp.find_refresher(self.settings)
+        ref_btn = button(t, "Open Refresher" if ref else "Get Refresher", False,
+                         (lambda: subprocess.Popen([ref], start_new_session=True)) if ref else
+                         (lambda: open_url(lbp.REFRESHER_RELEASES)))
+        row(pw_ok and bool(patched), "4. Patch the game with Refresher (adds Patchwork)",
+            ("Patched: " + ", ".join(g.serial for g in patched) + "." if patched and pw_ok else
+             "Close RPCS3, open Refresher, choose “RPCS3 Patch”, and give it your dev_hdd0 folder:\n"
+             f"{rp.dev_hdd0}\nPick your LBP game and a server (Beacon or Bonsai), then Patch. Do this once per "
+             "LBP game. Refresher is the only patcher LBP Union approves; it also installs Patchwork, which "
+             "blocks a known in-game exploit."), ref_btn, manual=True)
+        acct = {k: v["account"] for k, v in lbp.SERVERS.items()}
+        row(False, "5. Make an account on the server",
+            "Beacon: " + acct["beacon"] + "\nBonsai: " + acct["bonsai"], manual=True)
+        lay.addWidget(st)
+
+        olds = lbp.old_server_patches(rp)
+        if olds:
+            lay.addWidget(W.label("Heads up: RPCS3 still has old server-redirect game patches turned on (" + ", ".join(olds)
+                                  + "). With Patchwork in use, switch those off in RPCS3 → Manage → Game Patches.",
+                                  t, 13, "stamp", wrap=True))
+
+        # -- server switcher -------------------------------------------------------------------
+        lay.addWidget(section(t, "Server"))
+        now = {"beacon": "Beacon", "bonsai": "Bonsai", "custom": f"a custom server ({server_url})", None: "none yet"}[server_key]
+        lay.addWidget(W.label(f"Your LBP games currently connect to: {now}", t, 14))
+        cards = QHBoxLayout()
+        for key, info in lbp.SERVERS.items():
+            c = W.Panel(pad=16, spacing=8)
+            c.layout().addWidget(W.label(f"{info['name']}  ·  {info['by']}", t, 17, display=True, bold=True))
+            c.layout().addWidget(W.label(info["base"], t, 12, "muted"))
+            br = QHBoxLayout()
+            use = button(t, "Using this" if key == server_key else "Switch to " + info["name"], key != server_key,
+                         lambda _=False, k=key: self._lbp_switch(k))
+            use.setEnabled(pw_ok and key != server_key)
+            br.addWidget(use)
+            br.addWidget(button(t, "Website", False, lambda _=False, u=info["site"]: open_url(u)))
+            br.addStretch(1)
+            c.layout().addLayout(br)
+            cards.addWidget(c)
+        lay.addLayout(cards)
+        if not pw_ok:
+            lay.addWidget(W.label("Switching servers unlocks after step 4 — Refresher installs the Patchwork module "
+                                  "that osmosis points at the server.", t, 13, "muted", wrap=True))
+
+        jr = QHBoxLayout()
+        jr.addWidget(W.label("Join key (optional)", t, 14, "muted"))
+        jk = QLineEdit(lbp.lobby_password(rp))
+        jk.setPlaceholderText("only players with the same key can join your games")
+        jr.addWidget(jk, 1)
+        save = button(t, "Save key", False, lambda: self._lbp_key(jk.text()))
+        save.setEnabled(pw_ok)
+        jr.addWidget(save)
+        lay.addLayout(jr)
+
+        if patched:
+            lay.addWidget(section(t, "Undo"))
+            ur = QHBoxLayout()
+            for g in patched:
+                ur.addWidget(button(t, f"Restore original {g.serial}", False, lambda _=False, g=g: self._lbp_unpatch(g)))
+            ur.addStretch(1)
+            lay.addLayout(ur)
+        links = QHBoxLayout()
+        links.addWidget(button(t, "Refresher's RPCS3 guide", False, lambda: open_url(lbp.REFRESHER_GUIDE)))
+        links.addStretch(1)
+        lay.addLayout(links)
+        lay.addStretch(1)
+        return scroll(inner)
+
+    def _lbp_network(self):
+        from .. import lbp
+        if backup.rpcs3_running():
+            self.say("Close RPCS3 first — it rewrites its config when it exits.", sound="error")
+            return
+        lbp.enable_network(self.profile.rpcs3)
+        self.say("RPCS3 network set to Connected + RPCN.")
+        QTimer.singleShot(0, self.reload)
+
+    def _lbp_switch(self, key):
+        from .. import lbp
+        rp = self.profile.rpcs3
+        if backup.rpcs3_running():
+            self.say("Close RPCS3 first.", sound="error")
+            return
+        self.toast.show_message(f"Asking {lbp.SERVERS[key]['name']} for its settings…", ms=30_000)
+        run_bg(self, lambda _p: lbp.set_server(rp, key), lambda url: (self.say(f"LBP now connects to {url}"),
+                                                                        QTimer.singleShot(0, self.reload)),
+               lambda err: self.say(f"Couldn't switch: {err}", sound="error"))
+
+    def _lbp_key(self, text):
+        from .. import lbp
+        rp = self.profile.rpcs3
+        key, _url = lbp.current_server(rp)
+        try:
+            d = lbp._pw(rp, "x").parent
+            d.mkdir(parents=True, exist_ok=True)
+            f = d / "patchwork_lobby_password.txt"
+            if text.strip():
+                f.write_text(text.strip(), encoding="utf-8")
+            else:
+                f.unlink(missing_ok=True)
+            self.say("Join key saved." if text.strip() else "Join key cleared.")
+        except OSError as e:
+            self.say(f"Couldn't save: {e}", sound="error")
+
+    def _lbp_unpatch(self, g):
+        from .. import lbp
+        if QMessageBox.question(self, "Restore original", f"Put {g.game.title}'s unpatched EBOOT back? "
+                                "It won't connect to custom servers until you patch it again.") != QMessageBox.Yes:
+            return
+        try:
+            lbp.restore_original(g)
+            self.say("Original EBOOT restored.")
+            QTimer.singleShot(0, self.reload)
+        except Exception as e:
+            self.say(str(e), sound="error")
+
     # -- settings --------------------------------------------------------------------------------------------------
     def page_settings(self):
         t = self.theme
@@ -837,6 +1046,10 @@ class Window(QMainWindow):
         mc.setChecked(s.ribbon_month_colors)
         mc.toggled.connect(lambda v: self._set("ribbon_month_colors", v, retheme=True))
         p.layout().addWidget(mc)
+        md = QCheckBox("Ribbon plays each game's menu music and preview video when you rest on it (needs ffmpeg)")
+        md.setChecked(s.ribbon_media)
+        md.toggled.connect(lambda v: self._set("ribbon_media", v, retheme=True))
+        p.layout().addWidget(md)
         lay.addWidget(p)
 
         lay.addWidget(section(t, "Locations & accounts"))
@@ -859,6 +1072,7 @@ class Window(QMainWindow):
         field("RPCS3 folder", "rpcs3_config_dir", str(rp.config_dir) if rp else "~/.config/rpcs3 (auto)")
         field("rpcs3 program", "rpcs3_binary", rpcs3_binary(config.Settings()) or "auto")
         field("SteamGridDB API key", "steamgriddb_api_key", "steamgriddb.com → Preferences → API", secret=True)
+        field("Refresher program", "refresher_path", "auto (PATH, ~/Applications, ~/Downloads)")
         f.layout().addWidget(W.label("The API key is free and only used to download library art. It's never "
                                      "included in backups.", t, 12, "muted", wrap=True))
         lay.addWidget(f)

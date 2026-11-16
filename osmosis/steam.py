@@ -33,6 +33,38 @@ OSMOSIS_TAG = "osmosis"
 ART_SLOTS = {"cover": "p", "wide": "", "hero": "_hero", "logo": "_logo", "icon": "_icon"}
 
 
+def rpcs3_style_art(g: Game, slot: str) -> tuple[bytes, str] | None:
+    """The art RPCS3's own "Create Steam Shortcut" makes (rpcs3qt/steam_utils.cpp):
+    the large banner (PIC1, else PIC3/PIC0/PIC2/ICON0) is used as-is for the wide capsule
+    and the hero; ICON0 is used as-is for the logo and icon, and centred on a 600x900
+    transparent canvas for the portrait cover."""
+    large = g.background or g.icon
+    small = g.icon
+    src = large if slot in ("wide", "hero") else small
+    if not src:
+        return None
+    if slot != "cover":
+        return src.read_bytes(), ".png"
+    try:
+        from PySide6.QtCore import QBuffer, QIODevice, Qt
+        from PySide6.QtGui import QImage, QPainter
+        img = QImage(str(src))
+        if img.isNull():
+            return src.read_bytes(), ".png"
+        canvas = QImage(600, 900, QImage.Format_ARGB32_Premultiplied)
+        canvas.fill(Qt.transparent)
+        scaled = img.scaled(600, 900, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p = QPainter(canvas)
+        p.drawImage((600 - scaled.width()) // 2, (900 - scaled.height()) // 2, scaled)
+        p.end()
+        buf = QBuffer()
+        buf.open(QIODevice.WriteOnly)
+        canvas.save(buf, "PNG")
+        return bytes(buf.data()), ".png"
+    except Exception:
+        return src.read_bytes(), ".png"
+
+
 def candidate_roots() -> list[Path]:
     h = Path.home()
     return [h / ".local/share/Steam", h / ".steam/steam", h / ".steam/root",
@@ -283,7 +315,8 @@ class SteamLibrary:
 
         # Art -------------------------------------------------------------------
         if not dry_run and settings.steam.fetch_art:
-            client = sgdb or (SteamGridDB(settings.steamgriddb_api_key) if settings.steamgriddb_api_key else None)
+            use_sgdb = settings.steam.art_source == "steamgriddb"
+            client = (sgdb or (SteamGridDB(settings.steamgriddb_api_key) if settings.steamgriddb_api_key else None)) if use_sgdb else None
             cache_path = config.data_dir() / "sgdb-cache.json"
             try:
                 cache = json.loads(cache_path.read_text())
@@ -317,11 +350,11 @@ class SteamLibrary:
                         rep.warnings.append(f"{g.title}: {err}")
                         if "API key" in str(err):
                             client = None
-                # Fallback: the game's own PS3 art, like RPCS3's button uses.
+                # The game's own art, made exactly the way RPCS3's button makes it.
                 for slot in list(missing):
-                    src = g.background if slot in ("hero", "wide") else g.icon
-                    if src:
-                        self._write_art(appid, slot, src.read_bytes(), ".png")
+                    art = rpcs3_style_art(g, slot)
+                    if art:
+                        self._write_art(appid, slot, *art)
                         written.append(slot + " (game art)")
                 if written:
                     rep.art[g.title] = written

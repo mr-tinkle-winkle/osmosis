@@ -23,6 +23,9 @@ Target: NixOS, KDE Plasma, nixpkgs RPCS3, nixpkgs Steam (both autodetected, with
 | `widgets.py` | Game cards, hero banner (Steam hero/logo art when synced), trophy rows, toast, clipboard helper. |
 | `app.py` | Window, pages (Profile, Library, game detail, Steam Sync, Backup, Settings), import conflict dialog, in-window watcher. The watcher runs only when the service doesn't hold the lock. |
 | `fonts/` | Bundled OFL/Apache fonts. |
+| `xmb.py` | Ribbon's library: a vertical list in the PS3-menu style. Holding on a game fades in its PIC1, plays SND0 and swaps the icon for ICON1. |
+| `media.py` | Converts SND0.AT3 / ICON1.PAM with ffmpeg into a cache, then plays them through Qt Multimedia. Players are created lazily, never under offscreen Qt (creating QAudioOutput without an audio device segfaults). Untested against real PAM/AT3 files. |
+| `osmosis/lbp.py` | LittleBigPlanet online. Detects LBP games and Refresher patch state (`USRDIR/EBOOT.BIN.ORIG`). Patchwork's shared settings live in `dev_hdd0/plugins/patchwork/` (`patchwork_url.txt`, `patchwork_digest.txt`, `patchwork_lobby_password.txt`). Servers are switched via `<base>/autodiscover`. RPCS3 network lines are edited in place (`Net: Internet enabled: Connected`, `PSN status: RPCN`). EBOOT decryption and SPRX injection stay with Refresher, the only patcher LBP Union approves. Servers: Beacon `https://beacon.lbpunion.com`, Bonsai (formerly Refresh) `https://lbp.lbpbonsai.com`. |
 
 **Not verified.** `nix build`. The flake parses, but nixpkgs could not be fetched in the development sandbox. The first build on a real machine is the real check.
 
@@ -44,6 +47,9 @@ Target: NixOS, KDE Plasma, nixpkgs RPCS3, nixpkgs Steam (both autodetected, with
 | `osmosis/cli.py` | Every feature, scriptable. |
 
 ## Decisions and rationale
+
+- **Default Steam art is RPCS3's own recipe** (`steam.rpcs3_style_art`, from `rpcs3qt/steam_utils.cpp`). PIC1 (else PIC3/PIC0/PIC2/ICON0) is used as-is for the wide capsule and hero. ICON0 is used as-is for the logo and icon, and centred on a 600x900 transparent canvas for the cover. RPCS3 has no CLI for creating shortcuts, so the recipe is reimplemented. SteamGridDB is opt-in (`steam.art_source`).
+- **UI sounds play through pw-play/paplay** subprocesses. QSoundEffect is only a fallback.
 
 - **Own sync rather than RPCS3's built-in button.** The button works one game at a time and uses only the game's small PS3 art. osmosis does the whole library, fetches proper art and cleans up removed games. It reuses the button's launch format so the two never collide.
 - **Session history starts when osmosis starts watching.** RPCS3 stores only running totals. Trophy history is complete from day one because `TROPUSR.DAT` keeps unlock times.

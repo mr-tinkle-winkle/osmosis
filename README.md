@@ -42,5 +42,5 @@ inputs.osmosis.url = "github:mr-tinkle-winkle/osmosis";
 inputs.osmosis.inputs.nixpkgs.follows = "nixpkgs";
 # ...
 imports = [ inputs.osmosis.nixosModules.default ];
-programs.osmosis.enable = true;   # also runs the per-user play-session watcher
+services.osmosis = { enable = true; user = "you"; };   # also runs the per-user play-session watcher
 ```

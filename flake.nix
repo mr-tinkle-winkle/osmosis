@@ -85,12 +85,16 @@
 
       nixosModules.default = { config, lib, pkgs, ... }:
         let
-          cfg = config.programs.osmosis;
+          cfg = config.services.osmosis;
           pkg = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
         in
         {
-          options.programs.osmosis = {
+          options.services.osmosis = {
             enable = lib.mkEnableOption "osmosis (RPCS3 <-> Steam companion)";
+            user = lib.mkOption {
+              type = lib.types.str;
+              description = "User whose RPCS3 and Steam folders osmosis watches.";
+            };
             watcher = lib.mkOption {
               type = lib.types.bool;
               default = true;
@@ -107,6 +111,7 @@
             systemd.user.services.osmosis-watcher = lib.mkIf cfg.watcher {
               description = "osmosis play-session watcher";
               wantedBy = [ "default.target" ];
+              unitConfig.ConditionUser = cfg.user;
               serviceConfig = {
                 ExecStart = "${pkg}/bin/osmosis-watcher";
                 Restart = "on-failure";

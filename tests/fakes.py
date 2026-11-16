@@ -8,8 +8,17 @@ from osmosis import vdf
 from osmosis.sfo import build_sfo
 from osmosis.trophies import build_tropusr, datetime_to_rtc_tick
 
-PNG = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
-       b"\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82")
+def _png() -> bytes:
+    import struct, zlib
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    raw = b"\x00" + b"\x40\x60\xa0" * 4
+    rows = raw * 4
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+PNG = _png()
 
 
 def tropconf(npid: str, title: str, trophies: list[tuple[int, str, str]]) -> bytes:

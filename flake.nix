@@ -11,21 +11,49 @@
       forAllSystems = nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ];
 
       mkOsmosis = pkgs:
-        let python = pkgs.python3;
-        in python.pkgs.buildPythonApplication {
+        let
+          python = pkgs.python3;
+        in
+        python.pkgs.buildPythonApplication {
           pname = "osmosis";
           version = "0.1.0";
           format = "pyproject";
           src = ./.;
-          nativeBuildInputs = [ python.pkgs.setuptools ];
-          propagatedBuildInputs = with python.pkgs; [ pyyaml tomli-w ];
+
+          nativeBuildInputs = [ python.pkgs.setuptools pkgs.qt6.wrapQtAppsHook ];
+          buildInputs = [
+            pkgs.qt6.qtbase
+            pkgs.qt6.qtwayland
+            pkgs.qt6.qtmultimedia   # theme sounds (QSoundEffect); without it the app is silent
+            pkgs.qt6.qtsvg
+            pkgs.qt6.qtimageformats # .jpg/.webp art from SteamGridDB in the library view
+            pkgs.xcb-util-cursor
+          ];
+          propagatedBuildInputs = with python.pkgs; [ pyyaml tomli-w pyside6 ];
+
           nativeCheckInputs = [ python.pkgs.pytestCheckHook ];
+          preCheck = ''
+            export QT_QPA_PLATFORM=offscreen
+            export HOME=$TMPDIR
+          '';
           pythonImportsCheck = [ "osmosis" ];
+
+          postInstall = ''
+            install -Dm644 data/osmosis.desktop $out/share/applications/osmosis.desktop
+            install -Dm644 data/osmosis.svg $out/share/icons/hicolor/scalable/apps/osmosis.svg
+          '';
+
+          # wrapQtApp explicitly: the hook doesn't reliably wrap Python entry-point scripts.
+          dontWrapQtApps = true;
+          postFixup = ''
+            wrapQtApp "$out/bin/osmosis"
+          '';
+
           meta = {
             description = "RPCS3 <-> Steam companion";
             homepage = "https://github.com/mr-tinkle-winkle/osmosis";
             platforms = pkgs.lib.platforms.linux;
-            mainProgram = "osmosis-cli";
+            mainProgram = "osmosis";
           };
         };
     in
@@ -34,11 +62,24 @@
         default = mkOsmosis (import nixpkgs { inherit system; });
       });
 
+      apps = forAllSystems (system:
+        let pkg = self.packages.${system}.default;
+        in {
+          default = { type = "app"; program = "${pkg}/bin/osmosis"; };
+          cli = { type = "app"; program = "${pkg}/bin/osmosis-cli"; };
+        });
+
       devShells = forAllSystems (system:
         let pkgs = import nixpkgs { inherit system; };
         in {
           default = pkgs.mkShell {
-            packages = [ (pkgs.python3.withPackages (ps: [ ps.pyyaml ps.tomli-w ps.pytest ])) ];
+            packages = [
+              (pkgs.python3.withPackages (ps: [ ps.pyyaml ps.tomli-w ps.pyside6 ps.pytest ]))
+              pkgs.qt6.qtbase pkgs.qt6.qtwayland pkgs.qt6.qtmultimedia
+            ];
+            shellHook = ''
+              export QT_PLUGIN_PATH="${pkgs.qt6.qtbase}/lib/qt-6/plugins:${pkgs.qt6.qtwayland}/lib/qt-6/plugins:${pkgs.qt6.qtmultimedia}/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+            '';
           };
         });
 

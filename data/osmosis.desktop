@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=osmosis
+GenericName=RPCS3 Companion
+Comment=Sync RPCS3 with Steam, back up saves and trophies, see your PS3 profile
+Exec=osmosis
+Icon=osmosis
+Terminal=false
+Categories=Game;Utility;
+Keywords=rpcs3;ps3;steam;trophies;backup;
+StartupWMClass=osmosis

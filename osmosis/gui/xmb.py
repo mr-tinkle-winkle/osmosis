@@ -33,6 +33,7 @@ class XmbList(QWidget):
         self.theme = theme
         self.backdrop = backdrop
         self.media_on = settings.ribbon_media
+        self.preview_bg = settings.ribbon_preview == "background"
         self.index = 0
         self.offset = 0.0
         self.setFocusPolicy(Qt.StrongFocus)
@@ -45,6 +46,8 @@ class XmbList(QWidget):
         self._dwell.setSingleShot(True)
         self._dwell.timeout.connect(self._activate)
         self._hover_idx = None
+        self._anchor = None            # mouse position the current hover started from
+        self._moved_at = 0.0           # when the list last moved under the pointer
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
         self._hover_timer.timeout.connect(self._hover_select)
@@ -74,6 +77,11 @@ class XmbList(QWidget):
         self.index = i
         if sound:
             PLAYER.play("nav")
+        import time
+        self._moved_at = time.monotonic()
+        self._hover_idx = None
+        self._hover_timer.stop()
+        self._anchor = None
         self._anim.stop()
         self._anim.setStartValue(self.offset)
         self._anim.setEndValue(float(i))
@@ -138,16 +146,33 @@ class XmbList(QWidget):
         return None
 
     def mouseMoveEvent(self, e):
-        i = self._hit(e.position())
+        """Resting the pointer on a game selects it -- but only after a real, deliberate
+        move. Mice report tiny jitters while still, and the list slides under the pointer
+        after every selection; neither may count, or the list scrolls by itself."""
+        self._pointer_moved(e.position())
+
+    def _pointer_moved(self, pos):
+        import time
+        i = self._hit(pos)
+        self.setCursor(Qt.PointingHandCursor if i is not None else Qt.ArrowCursor)
+        if time.monotonic() - self._moved_at < 0.6:      # list still settling under the pointer
+            self._anchor = pos
+            return
+        if self._anchor is not None and (pos - self._anchor).manhattanLength() < 12:
+            return                                        # jitter, not a move
+        self._anchor = pos
         if i != self._hover_idx:
             self._hover_idx = i
             self._hover_timer.stop()
             if i is not None and i != self.index:
-                self._hover_timer.start(DWELL_MS // 2)
-        self.setCursor(Qt.PointingHandCursor if i is not None else Qt.ArrowCursor)
+                self._hover_timer.start(DWELL_MS)
 
     def _hover_select(self):
-        if self._hover_idx is not None:
+        from PySide6.QtGui import QCursor
+        if self._hover_idx is None:
+            return
+        # still over the same game, from where the hover began?
+        if self._hit(self.mapFromGlobal(QCursor.pos()).toPointF()) == self._hover_idx:
             self.select(self._hover_idx)
 
     def leaveEvent(self, e):
@@ -180,6 +205,11 @@ class XmbList(QWidget):
             p.setFont(W.font(t, 18))
             p.drawText(self.rect(), Qt.AlignCenter, "No games found in RPCS3.")
             return
+        if self.preview_bg and self.media.frame is not None:
+            img = self.media.frame.scaled(self.size(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            p.setOpacity(0.55)
+            p.drawImage((self.width() - img.width()) // 2, (self.height() - img.height()) // 2, img)
+            p.setOpacity(1.0)
         x0 = 252
         cy = self.height() * 0.40
         lo = int(self.offset) - 6
@@ -196,7 +226,8 @@ class XmbList(QWidget):
             if y < -h or y > self.height() + h:
                 continue
             p.setOpacity(alpha)
-            icon = self.media.frame if (i == self.index and self.media.frame is not None and abs(d) < 0.05) else None
+            icon = (self.media.frame if (not self.preview_bg and i == self.index and self.media.frame is not None
+                                         and abs(d) < 0.05) else None)
             if icon is not None:
                 img = icon.scaled(r.size().toSize(), Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
                 sx = (img.width() - r.width()) / 2
@@ -204,11 +235,6 @@ class XmbList(QWidget):
                 p.drawImage(r, img, QRectF(sx, sy, r.width(), r.height()))
             else:
                 p.drawPixmap(r.toRect(), self._icon(e))
-            if focus > 0.5:
-                glow = QColor(255, 255, 255, int(70 * focus))
-                p.setPen(glow)
-                p.setBrush(Qt.NoBrush)
-                p.drawRect(r.adjusted(-1, -1, 1, 1))
             # text
             tx = r.right() + 26
             p.setPen(QColor(255, 255, 255))

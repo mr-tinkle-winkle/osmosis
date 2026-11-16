@@ -27,16 +27,17 @@ from .timeline import Timeline, events_from
 # Results must come back on the GUI thread. A signal connected to a plain Python
 # function runs that function in the *emitting* thread, so everything is routed
 # through _Relay, a QObject living on the GUI thread, which makes Qt queue the calls.
-class _Job(QObject):
+class _Worker(QThread):
+    """Runs fn(progress) on its own thread. The QThread object itself lives on the GUI
+    thread (parented to the window), so nothing is ever deleted from the wrong thread."""
     done = Signal(object)
     failed = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, fn):
-        super().__init__()
+    def __init__(self, fn, parent):
+        super().__init__(parent)
         self.fn = fn
 
-    @Slot()
     def run(self):
         try:
             self.done.emit(self.fn(self.progress.emit))
@@ -66,16 +67,11 @@ class _Relay(QObject):
 
 
 def run_bg(owner, fn, on_done, on_fail=None, on_progress=None):
-    th = QThread(owner)
-    job = _Job(fn)
-    job.moveToThread(th)
     relay = _Relay(on_done, on_fail, on_progress, owner)   # lives on the GUI thread
-    th.started.connect(job.run)
-    job.done.connect(relay.done, Qt.QueuedConnection)
-    job.failed.connect(relay.failed, Qt.QueuedConnection)
-    job.progress.connect(relay.progress, Qt.QueuedConnection)
-    job.done.connect(th.quit)
-    job.failed.connect(th.quit)
+    th = _Worker(fn, owner)
+    th.done.connect(relay.done, Qt.QueuedConnection)
+    th.failed.connect(relay.failed, Qt.QueuedConnection)
+    th.progress.connect(relay.progress, Qt.QueuedConnection)
 
     def cleanup():
         owner._jobs = [j for j in getattr(owner, "_jobs", []) if j[0] is not th]
@@ -83,7 +79,7 @@ def run_bg(owner, fn, on_done, on_fail=None, on_progress=None):
         th.deleteLater()
 
     th.finished.connect(cleanup)
-    owner._jobs = getattr(owner, "_jobs", []) + [(th, job, relay)]
+    owner._jobs = getattr(owner, "_jobs", []) + [(th, relay)]
     th.start()
 
 
@@ -265,7 +261,10 @@ class Window(QMainWindow):
         pal.setColor(QPalette.Window, QColor(t.c.bg))
         pal.setColor(QPalette.WindowText, QColor(t.c.text))
         app.setPalette(pal)
-        self.backdrop.set_theme(t, self.settings.ribbon_month_colors)
+        self.backdrop.set_theme(t, self.settings.ribbon_month_colors, fixed_color=self.settings.ribbon_color,
+                                daylight=self.settings.ribbon_daylight)
+        from . import sounds as _snd
+        _snd.CHOICES = dict(self.settings.sound_choices)
         PLAYER.enabled = self.settings.sounds
         PLAYER.set_name = t.sounds
         if reload:
@@ -286,7 +285,8 @@ class Window(QMainWindow):
         self.backdrop.setLayout(root)
 
         pages = [("profile", self.page_profile), ("library", self.page_library), ("steam", self.page_steam),
-                 ("backup", self.page_backup), ("misc", self.page_misc), ("settings", self.page_settings)]
+                 ("backup", self.page_backup), ("install", self.page_install), ("misc", self.page_misc),
+                 ("settings", self.page_settings)]
         self.n_pages = len(pages)
         if getattr(self, "xmb", None) is not None:
             try:
@@ -329,7 +329,7 @@ class Window(QMainWindow):
             self.nav_buttons.append(b)
             nl.addWidget(b)
             if top:
-                nl.addSpacing(26)
+                nl.addSpacing(10)
         nl.addStretch(1)
         status = self._status_text()
         st = W.label(status, t, 12, "muted", wrap=True)
@@ -861,6 +861,102 @@ class Window(QMainWindow):
 
         run_bg(self, work, done, lambda err: self.say(f"Restore failed: {err}", sound="error"))
 
+    # -- install packages -------------------------------------------------------------------------------
+    def page_install(self):
+        from .. import install as inst
+        t = self.theme
+        inner, lay = self._page(t.w("install"))
+        rp = self.profile.rpcs3 if self.profile else None
+        if not rp:
+            self._no_rpcs3(lay)
+            lay.addStretch(1)
+            return scroll(inner)
+        lay.addWidget(W.label("Install games, updates and DLC you already have as files. Licence files (.rap, "
+                              ".edat) are copied straight into RPCS3; each .pkg is installed by RPCS3 itself, one "
+                              "after another.", t, 14, "muted", wrap=True))
+        self._inst_paths: list[Path] = []
+        lst = QListWidget()
+        lst.setMinimumHeight(220)
+        summary = W.label("Nothing chosen yet.", t, 13, "muted")
+
+        def refresh():
+            lst.clear()
+            found = inst.scan(self._inst_paths)
+            for f in found.pkgs:
+                lst.addItem(f"package   {f.name}")
+            for f in found.licences:
+                lst.addItem(f"licence   {f.name}")
+            summary.setText(f"{len(found.pkgs)} package(s), {len(found.licences)} licence file(s)." if found
+                            else "No .pkg, .rap or .edat files found there.")
+            go.setEnabled(bool(found))
+
+        def add_files():
+            fs, _ = QFileDialog.getOpenFileNames(self, "Choose packages and licences", str(Path.home()),
+                                                 "PS3 content (*.pkg *.rap *.edat *.PKG *.RAP *.EDAT)")
+            self._inst_paths += [Path(f) for f in fs]
+            refresh()
+
+        def add_folder():
+            d = QFileDialog.getExistingDirectory(self, "Choose a folder to scan", str(Path.home()))
+            if d:
+                self._inst_paths.append(Path(d))
+                refresh()
+
+        def clear():
+            self._inst_paths = []
+            refresh()
+
+        row = QHBoxLayout()
+        row.addWidget(button(t, "Add files…", False, add_files))
+        row.addWidget(button(t, "Add a folder…", False, add_folder))
+        row.addWidget(button(t, "Clear", False, clear))
+        row.addStretch(1)
+        lay.addLayout(row)
+        lay.addWidget(lst)
+        lay.addWidget(summary)
+        status = W.label("", t, 13, "muted", wrap=True)
+        go = button(t, "Install", True, lambda: self._do_install(status))
+        go.setEnabled(False)
+        gr = QHBoxLayout()
+        gr.addWidget(go)
+        gr.addStretch(1)
+        lay.addLayout(gr)
+        lay.addWidget(status)
+        lay.addStretch(1)
+        return scroll(inner)
+
+    def _do_install(self, status: QLabel):
+        from .. import install as inst
+        rp = self.profile.rpcs3
+        exe = rpcs3_binary(self.settings)
+        if backup.rpcs3_running():
+            self.say("Close RPCS3 first.", sound="error")
+            return
+        found = inst.scan(self._inst_paths)
+        if found.pkgs and not exe:
+            self.say("Couldn't find the rpcs3 program. Set its path in Settings.", sound="error")
+            return
+
+        def work(progress):
+            lic = inst.install_licences(rp, found.licences)
+            progress(f"Copied {len(lic)} licence file(s).")
+            res = inst.install_pkgs(exe, found.pkgs, progress) if found.pkgs else []
+            return lic, res
+
+        def done(out):
+            lic, res = out
+            ok = sum(1 for _p, code in res if code == 0)
+            self.say(f"Done: {len(lic)} licence file(s) copied, {ok} of {len(res)} package(s) installed.")
+            QTimer.singleShot(0, self.reload)
+
+        def prog(m):
+            try:
+                status.setText(m)
+            except RuntimeError:
+                pass
+
+        run_bg(self, work, done, lambda e: self.say(f"Install failed: {e}", sound="error"), prog)
+
     # -- miscellaneous: LBP online ---------------------------------------------------------------------
     def page_misc(self):
         from PySide6.QtCore import QUrl
@@ -1071,15 +1167,101 @@ class Window(QMainWindow):
         snd.setChecked(s.sounds)
         snd.toggled.connect(lambda v: self._set("sounds", v, retheme=True))
         p.layout().addWidget(snd)
-        mc = QCheckBox("Ribbon follows the calendar (colour by month, brightness by time of day)")
-        mc.setChecked(s.ribbon_month_colors)
-        mc.toggled.connect(lambda v: self._set("ribbon_month_colors", v, retheme=True))
-        p.layout().addWidget(mc)
-        md = QCheckBox("Ribbon plays each game's menu music and preview video when you rest on it (needs ffmpeg)")
+        lay.addWidget(p)
+
+        # -- Ribbon ---------------------------------------------------------------
+        from .themes import MONTH_COLORS, MONTH_NAMES
+        lay.addWidget(section(t, "Ribbon"))
+        rb = W.Panel(pad=18, spacing=10)
+        cr = QHBoxLayout()
+        cr.addWidget(W.label("Colour", t, 14, "muted"))
+        color = QComboBox()
+        color.addItem("Follow the calendar, like the PS3", "calendar")
+        for name, hexv in zip(MONTH_NAMES, MONTH_COLORS):
+            color.addItem(f"{name} colour", hexv)
+        color.addItem("Classic blue", "#1d4fa3")
+        color.addItem("Custom…", "custom")
+        from PySide6.QtGui import QPixmap as _QP
+        for i in range(1, color.count() - 1):
+            sw = _QP(14, 14)
+            sw.fill(QColor(color.itemData(i)))
+            color.setItemIcon(i, QIcon(sw))
+        if s.ribbon_month_colors:
+            color.setCurrentIndex(0)
+        else:
+            idx = color.findData(s.ribbon_color)
+            color.setCurrentIndex(idx if idx > 0 else color.count() - 1)
+
+        def pick_color(_i):
+            v = color.currentData()
+            if v == "calendar":
+                self._set_many(ribbon_month_colors=True)
+                return
+            if v == "custom":
+                from PySide6.QtWidgets import QColorDialog
+                c = QColorDialog.getColor(QColor(s.ribbon_color), self, "Ribbon colour")
+                if not c.isValid():
+                    return
+                v = c.name()
+            self._set_many(ribbon_month_colors=False, ribbon_color=v)
+
+        color.currentIndexChanged.connect(pick_color)
+        cr.addWidget(color, 1)
+        rb.layout().addLayout(cr)
+        dl = QCheckBox("Darker at night, brighter in the day (like the PS3)")
+        dl.setChecked(s.ribbon_daylight)
+        dl.toggled.connect(lambda v: self._set("ribbon_daylight", v, retheme=True))
+        rb.layout().addWidget(dl)
+        md = QCheckBox("Play each game's menu music and animated icon when you rest on it (needs ffmpeg)")
         md.setChecked(s.ribbon_media)
         md.toggled.connect(lambda v: self._set("ribbon_media", v, retheme=True))
-        p.layout().addWidget(md)
-        lay.addWidget(p)
+        rb.layout().addWidget(md)
+        pr = QHBoxLayout()
+        pr.addWidget(W.label("Animated icon plays", t, 14, "muted"))
+        pv = QComboBox()
+        pv.addItem("In the icon, like the PS3", "icon")
+        pv.addItem("Across the whole background", "background")
+        pv.setCurrentIndex(0 if s.ribbon_preview != "background" else 1)
+        pv.currentIndexChanged.connect(lambda _i: self._set("ribbon_preview", pv.currentData(), retheme=True))
+        pr.addWidget(pv, 1)
+        rb.layout().addLayout(pr)
+        lay.addWidget(rb)
+
+        # -- sound picker (themes with alternatives) ----------------------------------------
+        from . import sounds as snd
+        set_name = THEMES.get(s.theme, THEMES["ribbon"]).sounds
+        if snd.VARIANTS.get(set_name):
+            lay.addWidget(section(t, f"{THEMES[s.theme].name} sounds"))
+            sp = W.Panel(pad=18, spacing=10)
+            for ev, label_text in (("nav", "Moving around"), ("select", "Pressing a button"), ("done", "Something finished"),
+                                   ("error", "Something went wrong")):
+                r = QHBoxLayout()
+                lbl = W.label(label_text, t, 14, "muted")
+                lbl.setFixedWidth(190)
+                r.addWidget(lbl)
+                cb = QComboBox()
+                for opt in snd.options(set_name, ev):
+                    cb.addItem(opt)
+                cur = s.sound_choices.get(f"{set_name}:{ev}")
+                if cur and cb.findText(cur) >= 0:
+                    cb.setCurrentIndex(cb.findText(cur))
+
+                def changed(_i, ev=ev, cb=cb):
+                    st = config.load()
+                    st.sound_choices[f"{set_name}:{ev}"] = cb.currentText()
+                    config.save(st)
+                    self.settings = st
+                    snd.CHOICES = dict(st.sound_choices)
+                    PLAYER.play(ev, cb.currentText(), force=True)
+
+                cb.currentIndexChanged.connect(changed)
+                r.addWidget(cb, 1)
+                prev = QPushButton("▶")
+                prev.setFixedWidth(46)
+                prev.clicked.connect(lambda _=False, ev=ev, cb=cb: PLAYER.play(ev, cb.currentText(), force=True))
+                r.addWidget(prev)
+                sp.layout().addLayout(r)
+            lay.addWidget(sp)
 
         lay.addWidget(section(t, "Locations & accounts"))
         f = W.Panel(pad=18, spacing=10)
@@ -1107,6 +1289,14 @@ class Window(QMainWindow):
         lay.addWidget(f)
         lay.addStretch(1)
         return scroll(inner)
+
+    def _set_many(self, **kw):
+        s = config.load()
+        for k, v in kw.items():
+            setattr(s, k, v)
+        config.save(s)
+        self.settings = s
+        QTimer.singleShot(0, lambda: self.apply_theme(reload=False))
 
     def _set(self, attr, value, retheme=False, reload=False):
         s = config.load()

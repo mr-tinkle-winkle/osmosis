@@ -14,7 +14,7 @@ from datetime import datetime
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                           QRadialGradient)
+                           QPolygonF, QRadialGradient)
 from PySide6.QtWidgets import QWidget
 
 from .themes import Theme, qcolor, ribbon_color
@@ -59,11 +59,15 @@ class Backdrop(QWidget):
         else:
             self._ov_target = 0.0
 
-    def set_theme(self, theme: Theme, month_colors: bool = True, animate: bool = True):
+    def set_theme(self, theme: Theme, month_colors: bool = True, animate: bool = True,
+                  fixed_color: str = "#1d4fa3", daylight: bool = True):
         self._theme = theme
         self._month_colors = month_colors
+        self._fixed_color = fixed_color
+        self._daylight = daylight
+        self._base_checked = 0.0
         self._cache = None
-        fps = {"ribbon": 33, "terminal": 50}.get(theme.backdrop)
+        fps = {"ribbon": 36, "terminal": 50}.get(theme.backdrop)
         if fps and animate:
             self._timer.start(fps)
         else:
@@ -230,23 +234,41 @@ class Backdrop(QWidget):
     def _ribbon_base(self) -> QColor:
         now = time.monotonic()
         if now - self._base_checked > 30:
-            self._base_color = ribbon_color(datetime.now(), self._month_colors)
+            self._base_color = ribbon_color(datetime.now(), self._month_colors,
+                                            getattr(self, "_fixed_color", "#1d4fa3"), getattr(self, "_daylight", True))
             self._base_checked = now
         return self._base_color
+
+    def _ribbon_base_pixmap(self, base: QColor) -> QPixmap:
+        key = (base.rgb(), self.width(), self.height())
+        if getattr(self, "_base_key", None) != key:
+            w, h = self.width(), self.height()
+            pm = QPixmap(self.size())
+            q = QPainter(pm)
+            g = QLinearGradient(0, 0, w * 0.35, h)
+            g.setColorAt(0, base.lighter(135))
+            g.setColorAt(0.55, base)
+            g.setColorAt(1, base.darker(320))
+            q.fillRect(pm.rect(), g)
+            q.end()
+            glow = QPixmap(self.size())
+            glow.fill(Qt.transparent)
+            q = QPainter(glow)
+            rg = QRadialGradient(w * 0.3, h * 0.22, max(w, h) * 0.6)
+            rg.setColorAt(0, QColor(255, 255, 255, 40))
+            rg.setColorAt(1, QColor(255, 255, 255, 0))
+            q.fillRect(glow.rect(), rg)
+            q.end()
+            self._base_pm, self._glow_pm, self._base_key = pm, glow, key
+        return self._base_pm
 
     def _paint_ribbon(self, p: QPainter):
         w, h = self.width(), self.height()
         t = time.monotonic() - self._t0
-        base = self._ribbon_base()
-        g = QLinearGradient(0, 0, w * 0.35, h)
-        g.setColorAt(0, base.lighter(135))
-        g.setColorAt(0.55, base)
-        g.setColorAt(1, base.darker(320))
-        p.fillRect(self.rect(), g)
-        glow = QRadialGradient(w * 0.3, h * 0.22, max(w, h) * 0.6)
-        glow.setColorAt(0, QColor(255, 255, 255, int(18 + 16 * math.sin(t * 0.45))))
-        glow.setColorAt(1, QColor(255, 255, 255, 0))
-        p.fillRect(self.rect(), glow)
+        p.drawPixmap(0, 0, self._ribbon_base_pixmap(self._ribbon_base()))
+        p.setOpacity(0.45 + 0.4 * math.sin(t * 0.45))
+        p.drawPixmap(0, 0, self._glow_pm)
+        p.setOpacity(1.0)
 
         self._ov_a += (self._ov_target - self._ov_a) * 0.08
         if self._ov is not None and self._ov_a > 0.01:
@@ -260,47 +282,53 @@ class Backdrop(QWidget):
         elif self._ov_target == 0.0 and self._ov_a <= 0.01:
             self._ov, self._ov_scaled = None, None
 
-        # soft sheets at 1/5 resolution, scaled up = blur
-        sw, sh = max(1, w // 5), max(1, h // 5)
+        # Sheets: each band is filled column by column; every column gets a gradient running
+        # from that column's top edge to its bottom edge, transparent at both ends and
+        # brightest just under the top -- a smooth translucent plane with soft borders that
+        # follows the twist. Rendered at 1/3 resolution and scaled up (a light blur).
+        sw, sh = max(1, w // 3), max(1, h // 3)
         img = QImage(sw, sh, QImage.Format_ARGB32_Premultiplied)
         img.fill(Qt.transparent)
         q = QPainter(img)
-        q.setRenderHint(QPainter.Antialiasing)
+        q.setRenderHint(QPainter.Antialiasing, False)
         q.scale(sw / w, sh / h)
+        q.setPen(Qt.NoPen)
         edges = []
+        stops = ((0.0, 0.0), (0.14, 0.6), (0.32, 1.0), (0.65, 0.6), (1.0, 0.0))
+        step = 6
+        xs = list(range(-24, w + 42, step))
         for (yf, amp, thick, p1, p2, speed, alpha) in RIBBON_BANDS:
             y0, a1, th = h * yf, h * amp, h * thick
             ph = t * speed * math.tau
             k = math.tau / (w * 0.9)
             bob = math.sin(t * 0.25 + p1) * h * 0.012
-            top, bot = [], []
-            for x in range(-20, w + 41, 12):
-                top.append(QPointF(x, y0 + bob + a1 * math.sin(k * x + p1 + ph) + a1 * 0.25 * math.sin(2.3 * k * x + p2 - ph * 0.7)))
-                bot.append(QPointF(x, y0 + bob + th + a1 * 0.8 * math.sin(k * x + p2 + ph * 1.15)))
-            path = QPainterPath(top[0])
-            for pt in top[1:]:
-                path.lineTo(pt)
-            for pt in reversed(bot):
-                path.lineTo(pt)
-            path.closeSubpath()
-            lg = QLinearGradient(0, y0 - a1, 0, y0 + th + a1)
-            lg.setColorAt(0, QColor(255, 255, 255, int(255 * alpha * 1.6)))
-            lg.setColorAt(0.5, QColor(255, 255, 255, int(255 * alpha * 0.6)))
-            lg.setColorAt(1, QColor(255, 255, 255, int(255 * alpha * 1.3)))
-            q.fillPath(path, lg)
-            edges.append(top)
+            top = [y0 + bob + a1 * math.sin(k * x + p1 + ph) + a1 * 0.25 * math.sin(2.3 * k * x + p2 - ph * 0.7) for x in xs]
+            bot = [y0 + bob + th + a1 * 0.8 * math.sin(k * x + p2 + ph * 1.15) for x in xs]
+            peak = 255 * alpha * 1.9
+            g = QLinearGradient(0, 0, 0, 1)
+            for f, v in stops:
+                g.setColorAt(f, QColor(255, 255, 255, max(0, min(255, int(peak * v)))))
+            for j in range(len(xs) - 1):
+                yt = (top[j] + top[j + 1]) * 0.5
+                yb = (bot[j] + bot[j + 1]) * 0.5
+                if abs(yb - yt) < 1:
+                    continue
+                g.setStart(0, yt)
+                g.setFinalStop(0, yb)
+                q.setBrush(g)
+                x0, x1 = xs[j], xs[j + 1]
+                q.drawPolygon(QPolygonF([QPointF(x0, top[j]), QPointF(x1, top[j + 1]),
+                                         QPointF(x1, bot[j + 1]), QPointF(x0, bot[j])]))
+            edges.append(QPolygonF([QPointF(x, y) for x, y in zip(xs, top)]))
         q.end()
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawImage(QRectF(0, 0, w, h), img)
 
         # crisp sheen on two edges
+        p.setBrush(Qt.NoBrush)
         for i, alpha in ((2, 0.38), (1, 0.22)):
-            path = QPainterPath(edges[i][0])
-            for pt in edges[i][1:]:
-                path.lineTo(pt)
             p.setPen(QPen(QColor(255, 255, 255, int(255 * alpha)), 1.6))
-            p.setBrush(Qt.NoBrush)
-            p.drawPath(path)
+            p.drawPolyline(edges[i])
 
         # sparkles
         p.setPen(Qt.NoPen)

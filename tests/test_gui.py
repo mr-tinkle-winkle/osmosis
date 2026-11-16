@@ -32,7 +32,7 @@ def test_theme_pages(app, tmp_path, theme, dark):
     w = A.Window()
     w.resize(1200, 800)
     w.show()
-    for i in range(6):
+    for i in range(7):
         w.go(i)
         app.processEvents()
         assert not w.grab().isNull()
@@ -55,7 +55,8 @@ def test_background_results_arrive_on_gui_thread(app):
     import time
     from PySide6.QtCore import QObject, QThread
     from osmosis.gui.app import run_bg
-    owner = QObject()
+    global _OWNER
+    owner = _OWNER = QObject()   # kept alive: Qt objects die with their Python owner
     seen = {}
 
     def work(progress):
@@ -71,3 +72,38 @@ def test_background_results_arrive_on_gui_thread(app):
         time.sleep(0.01)
     assert seen["done"] is app.thread() and seen["progress"] is app.thread()
     assert seen["worker"] is not app.thread()
+    while getattr(owner, "_jobs", None):      # let the thread finish before `owner` goes away
+        app.processEvents()
+        time.sleep(0.01)
+
+
+def test_xmb_ignores_jitter(app, tmp_path):
+    """Regression: the PS3-style list must not keep scrolling by itself under a still mouse."""
+    import time
+    from PySide6.QtCore import QPointF, Qt, QEvent
+    from PySide6.QtGui import QMouseEvent
+    from osmosis.gui.backdrop import Backdrop
+    from osmosis.gui.themes import resolve
+    from osmosis.gui.xmb import XmbList
+    from osmosis.library import load_profile
+    cfg = make_rpcs3(tmp_path)
+    s = config.Settings(rpcs3_config_dir=str(cfg))
+    entries = load_profile(s).entries
+    w = XmbList(entries, resolve("ribbon", True), Backdrop(), s)
+    w.resize(1200, 800)
+    w.show()
+    app.processEvents()
+    w.repaint()
+    w.select(1)
+    start = w.index
+    # the list just moved under a still pointer; jitter of a pixel or two for 2 s
+    r = w._rects[0][1].center() if w._rects else QPointF(400, 300)
+    t_end = time.time() + 2.0
+    k = 0
+    while time.time() < t_end:
+        p = r + QPointF(k % 2, 0)
+        w._pointer_moved(p)
+        app.processEvents()
+        time.sleep(0.02)
+        k += 1
+    assert w.index == start

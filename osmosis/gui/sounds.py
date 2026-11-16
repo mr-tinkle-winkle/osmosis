@@ -65,6 +65,28 @@ def _mix(*tracks, offsets=None):
     return out
 
 
+def _glide(f0, f1, dur, decay=0.08, amp=0.3, attack=0.003):
+    n = int(dur * RATE)
+    env = _env(n, attack, decay)
+    out, ph = [], 0.0
+    for i in range(n):
+        f = f0 + (f1 - f0) * (i / n)
+        ph += 2 * math.pi * f / RATE
+        out.append(math.sin(ph) * env[i] * amp)
+    return out
+
+
+def _bell(f, dur, decay=0.4, amp=0.25):
+    # inharmonic partials of a small bell
+    return _mix(*[_tone([f * r], dur, decay=decay / (1 + i * 0.6), amp=amp / (1 + i)) for i, r in enumerate((1, 2.76, 5.4))])
+
+
+def _sparkle(seed=3, n=7, amp=0.12):
+    rnd = random.Random(seed)
+    notes = [_tone([rnd.choice((1976, 2349, 2637, 2960, 3136, 3520))], 0.25, decay=0.06, amp=amp) for _ in range(n)]
+    return _mix(*notes, offsets=[i * 0.045 + rnd.uniform(0, 0.02) for i in range(n)])
+
+
 def _seq(notes, step, **kw):
     return _mix(*[_tone(f if isinstance(f, (list, tuple)) else [f], **kw) for f in notes],
                 offsets=[i * step for i in range(len(notes))])
@@ -127,11 +149,54 @@ SETS = {
 }
 
 
-def sound_file(set_name: str, event: str) -> Path | None:
-    gen = SETS.get(set_name, {}).get(event)
+# Alternatives to pick from per event (Settings > Sounds). The default stays the one in SETS.
+VARIANTS = {
+    "ribbon": {
+        "nav": {
+            "Glass tick": SETS["ribbon"]["nav"],
+            "Soft tick": lambda: _mix(_noise(0.02, decay=0.004, amp=0.22, lowpass=0.55, seed=21),
+                                      _tone([2900], 0.03, decay=0.008, amp=0.08)),
+            "Bubble": lambda: _glide(820, 1350, 0.07, decay=0.03, amp=0.22),
+            "Pluck": lambda: _tone([1318, 2636], 0.06, decay=0.016, amp=0.2),
+            "Air": lambda: _mix(_noise(0.09, decay=0.03, amp=0.12, lowpass=0.18, seed=22, attack=0.02),
+                                _tone([1976], 0.06, decay=0.02, amp=0.05)),
+        },
+        "select": {
+            "Chime": SETS["ribbon"]["select"],
+            "Whoosh + ping": lambda: _mix(_noise(0.22, decay=0.08, amp=0.14, lowpass=0.12, seed=23, attack=0.06),
+                                          _tone([1976, 2960], 0.4, decay=0.14, amp=0.14), offsets=[0, 0.1]),
+            "Bell": lambda: _bell(1568, 0.7, decay=0.35, amp=0.2),
+            "Rise": lambda: _mix(_glide(600, 1200, 0.16, decay=0.2, amp=0.16), _tone([1568], 0.35, decay=0.12, amp=0.12),
+                                 offsets=[0, 0.12]),
+        },
+        "done": {
+            "Arpeggio": SETS["ribbon"]["done"],
+            "Pad swell": lambda: _mix(*[_tone([f], 1.4, decay=0.6, amp=0.1, attack=0.18) for f in (523, 659, 784, 1047)]),
+            "Sparkle": lambda: _sparkle(),
+            "Two bells": lambda: _mix(_bell(1318, 0.9, amp=0.16), _bell(1976, 0.9, amp=0.14), offsets=[0, 0.12]),
+        },
+        "error": {
+            "Two notes": SETS["ribbon"]["error"],
+            "Thud": lambda: _mix(_tone([95], 0.25, decay=0.08, amp=0.4), _noise(0.06, decay=0.02, amp=0.2, lowpass=0.1)),
+            "Fall": lambda: _glide(700, 330, 0.25, decay=0.12, amp=0.22),
+        },
+    },
+}
+CHOICES: dict[str, str] = {}   # "set:event" -> variant; filled from settings by the window
+
+
+def options(set_name: str, event: str) -> list[str]:
+    return list(VARIANTS.get(set_name, {}).get(event, {}))
+
+
+def sound_file(set_name: str, event: str, variant: str | None = None) -> Path | None:
+    variant = variant if variant is not None else CHOICES.get(f"{set_name}:{event}", "")
+    gen = VARIANTS.get(set_name, {}).get(event, {}).get(variant) if variant else None
+    gen = gen or SETS.get(set_name, {}).get(event)
     if not gen:
         return None
-    p = config.data_dir() / "sounds" / "v1" / set_name / f"{event}.wav"
+    slug = "".join(c for c in (variant or "default").lower() if c.isalnum())
+    p = config.data_dir() / "sounds" / "v2" / set_name / f"{event}-{slug}.wav"
     if not p.is_file():
         p.parent.mkdir(parents=True, exist_ok=True)
         samples = gen()
@@ -169,17 +234,17 @@ class Player:
             self._qt = False
         self.last_error = ""
 
-    def play(self, event: str):
+    def play(self, event: str, variant: str | None = None, force: bool = False):
         import subprocess
         import time
-        if not (self.enabled and self.set_name):
+        if not (self.set_name and (self.enabled or force)):
             return
         now = time.monotonic()
         if now - self._last.get(event, 0) < 0.06:   # don't stack identical clicks
             return
         self._last[event] = now
         try:
-            f = sound_file(self.set_name, event)
+            f = sound_file(self.set_name, event, variant)
         except OSError as e:
             self.last_error = str(e)
             return
@@ -195,7 +260,7 @@ class Player:
         if self._qt:
             from PySide6.QtCore import QUrl
             from PySide6.QtMultimedia import QSoundEffect
-            key = (self.set_name, event)
+            key = (self.set_name, event, variant)
             eff = self._effects.get(key)
             if eff is None:
                 eff = QSoundEffect()

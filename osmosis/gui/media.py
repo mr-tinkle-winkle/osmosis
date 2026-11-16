@@ -11,7 +11,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QUrl, Signal, QTimer
+from PySide6.QtCore import QObject, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QImage
 
 from .. import config
@@ -74,7 +74,7 @@ class GameMedia(QObject):
         self.frame: QImage | None = None
         self.serial = None
         self._gen = 0
-        self.ready.connect(self._start)
+        self.ready.connect(self._start, Qt.QueuedConnection)
         self._music = self._video = None
         self._made = False
         self._fade = QTimer(self)
@@ -117,6 +117,7 @@ class GameMedia(QObject):
 
         threading.Thread(target=work, daemon=True).start()
 
+    @Slot(object, object)
     def _start(self, music, video):
         if not self._made or self.serial is None:
             return

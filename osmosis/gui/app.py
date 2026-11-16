@@ -6,7 +6,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPalette
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
@@ -24,6 +24,9 @@ from .timeline import Timeline, events_from
 
 
 # -- background work ----------------------------------------------------------------------------
+# Results must come back on the GUI thread. A signal connected to a plain Python
+# function runs that function in the *emitting* thread, so everything is routed
+# through _Relay, a QObject living on the GUI thread, which makes Qt queue the calls.
 class _Job(QObject):
     done = Signal(object)
     failed = Signal(str)
@@ -33,6 +36,7 @@ class _Job(QObject):
         super().__init__()
         self.fn = fn
 
+    @Slot()
     def run(self):
         try:
             self.done.emit(self.fn(self.progress.emit))
@@ -41,20 +45,45 @@ class _Job(QObject):
             self.failed.emit(str(e))
 
 
+class _Relay(QObject):
+    def __init__(self, on_done, on_fail, on_progress, parent):
+        super().__init__(parent)
+        self._d, self._f, self._p = on_done, on_fail, on_progress
+
+    @Slot(object)
+    def done(self, v):
+        self._d(v)
+
+    @Slot(str)
+    def failed(self, msg):
+        if self._f:
+            self._f(msg)
+
+    @Slot(str)
+    def progress(self, msg):
+        if self._p:
+            self._p(msg)
+
+
 def run_bg(owner, fn, on_done, on_fail=None, on_progress=None):
     th = QThread(owner)
     job = _Job(fn)
     job.moveToThread(th)
+    relay = _Relay(on_done, on_fail, on_progress, owner)   # lives on the GUI thread
     th.started.connect(job.run)
-    job.done.connect(on_done)
-    if on_fail:
-        job.failed.connect(on_fail)
-    if on_progress:
-        job.progress.connect(on_progress)
+    job.done.connect(relay.done, Qt.QueuedConnection)
+    job.failed.connect(relay.failed, Qt.QueuedConnection)
+    job.progress.connect(relay.progress, Qt.QueuedConnection)
     job.done.connect(th.quit)
     job.failed.connect(th.quit)
-    th.finished.connect(th.deleteLater)
-    owner._jobs = getattr(owner, "_jobs", []) + [(th, job)]
+
+    def cleanup():
+        owner._jobs = [j for j in getattr(owner, "_jobs", []) if j[0] is not th]
+        relay.deleteLater()
+        th.deleteLater()
+
+    th.finished.connect(cleanup)
+    owner._jobs = getattr(owner, "_jobs", []) + [(th, job, relay)]
     th.start()
 
 

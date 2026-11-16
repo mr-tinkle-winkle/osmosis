@@ -48,3 +48,26 @@ def test_sounds_render(tmp_path):
         for ev in events:
             p = sounds.sound_file(name, ev)
             assert p and p.stat().st_size > 1000
+
+
+def test_background_results_arrive_on_gui_thread(app):
+    """Regression: sync/export callbacks used to run on the worker thread and freeze the window."""
+    import time
+    from PySide6.QtCore import QObject, QThread
+    from osmosis.gui.app import run_bg
+    owner = QObject()
+    seen = {}
+
+    def work(progress):
+        progress("halfway")
+        time.sleep(0.05)
+        return QThread.currentThread()
+
+    run_bg(owner, work, lambda worker: seen.update(done=QThread.currentThread(), worker=worker),
+           on_progress=lambda _m: seen.update(progress=QThread.currentThread()))
+    end = time.time() + 5
+    while "done" not in seen and time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    assert seen["done"] is app.thread() and seen["progress"] is app.thread()
+    assert seen["worker"] is not app.thread()

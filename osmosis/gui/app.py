@@ -84,17 +84,20 @@ def run_bg(owner, fn, on_done, on_fail=None, on_progress=None):
 
 
 # -- stylesheet ----------------------------------------------------------------------------------
-def qss(t: Theme) -> str:
+def qss(t: Theme, frame_radius: int = 0) -> str:
     c = t.c
     r = t.radius
+    fr = max(0, frame_radius - 4)
     upper = "uppercase" if t.display_upper else "none"
-    sheet = (f"QWidget#Sheet {{ background: {c.panel}; border-left: 1px solid {c.border}; }}"
+    sheet = (f"QWidget#Sheet {{ background: {c.panel}; border-left: 1px solid {c.border}; "
+             f"border-top-right-radius: {max(0, frame_radius - 4)}px; border-bottom-right-radius: {max(0, frame_radius - 4)}px; }}"
              if t.id == "card_catalog" else "QWidget#Sheet { background: transparent; }")
     return f"""
     QWidget {{ color: {c.text}; }}
     QMainWindow, QScrollArea, QScrollArea > QWidget > QWidget, QStackedWidget {{ background: transparent; }}
     QFrame#Panel {{ background: {c.panel}; border: 1px solid {c.border}; border-radius: {r}px; }}
-    QFrame#Side {{ background: {c.panel}; border: none; border-right: 1px solid {c.border}; }}
+    QFrame#Side {{ background: {c.panel}; border: none; border-right: 1px solid {c.border};
+                   border-top-left-radius: {fr}px; border-bottom-left-radius: {fr}px; }}
     QFrame#TopNav {{ background: transparent; }}
     QFrame#Toast {{ background: {c.panel if t.id != 'ribbon' else 'rgba(10,20,50,0.85)'}; border: 1px solid {c.accent};
                     border-radius: {r}px; }}
@@ -217,6 +220,18 @@ class Window(QMainWindow):
         self.detail_serial: str | None = None
         self.backdrop = Backdrop()
         self.setCentralWidget(self.backdrop)
+        # Own frame: no system title bar; the window paints its rounded border itself
+        # (like Jeeves) and a slim bar at the top moves / minimises / maximises / closes it.
+        if self.settings.own_frame:
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
+        outer = QVBoxLayout(self.backdrop)
+        outer.setSpacing(0)
+        self.titlebar = TitleBar(self)
+        outer.addWidget(self.titlebar)
+        self.body = QWidget()
+        outer.addWidget(self.body, 1)
+        self._outer = outer
         self.toast = W.Toast(self.backdrop)
 
         # in-window session tracking when the background service isn't running
@@ -286,13 +301,14 @@ class Window(QMainWindow):
         f = QFont(t.font_body)
         f.setPixelSize(14)
         app.setFont(f)
-        app.setStyleSheet(qss(t))
+        app.setStyleSheet(qss(t, self.settings.frame_radius if self.settings.own_frame else 0))
         pal = app.palette()
         pal.setColor(QPalette.Window, QColor(t.c.bg))
         pal.setColor(QPalette.WindowText, QColor(t.c.text))
         app.setPalette(pal)
         self.backdrop.set_theme(t, self.settings.ribbon_month_colors, fixed_color=self.settings.ribbon_color,
                                 daylight=self.settings.ribbon_daylight)
+        self.backdrop.ribbon_strength = self.settings.ribbon_opacity / 100
         from . import sounds as _snd
         _snd.CHOICES = dict(self.settings.sound_choices)
         PLAYER.enabled = self.settings.sounds
@@ -313,7 +329,7 @@ class Window(QMainWindow):
                 keep = (self.stack.currentIndex(), cur.verticalScrollBar().value())
         except (AttributeError, RuntimeError):
             pass
-        old = self.backdrop.layout()
+        old = self.body.layout()
         if old:
             QWidget().setLayout(old)  # reparent+discard the previous tree
         t = self.theme
@@ -321,7 +337,8 @@ class Window(QMainWindow):
         root = QVBoxLayout() if top else QHBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.backdrop.setLayout(root)
+        self.body.setLayout(root)
+        self._apply_frame()
 
         pages = [("profile", self.page_profile), ("library", self.page_library), ("steam", self.page_steam),
                  ("backup", self.page_backup), ("install", self.page_install), ("misc", self.page_misc),
@@ -589,7 +606,25 @@ class Window(QMainWindow):
         top.addWidget(button(t, "‹ " + t.w("profile"), False, lambda: self.go(0)))
         top.addStretch(1)
         if "_file" not in d:
-            top.addWidget(button(t, "Add to friends", True, lambda: self._save_friend(d)))
+            if d.get("id") and d.get("id") == self.settings.profile_id:
+                top.addWidget(W.label("This is you.", t, 14, "muted"))
+                existing = None
+            else:
+                existing = {f.get("name"): f for f in public.friends(self.settings)}
+                by_id = {f.get("id"): f for f in existing.values() if f.get("id")}
+                if d.get("id") in by_id:          # same person, maybe renamed
+                    existing[d.get("name")] = by_id[d.get("id")]
+            if existing is None:
+                pass
+            elif d.get("name") in existing:
+                top.addWidget(button(t, "Update Friend", True,
+                                     lambda: self._save_friend(d, replace=existing[d.get("name")])))
+            else:
+                top.addWidget(button(t, "Add to friends", True, lambda: self._save_friend(d)))
+                if existing:
+                    top.addWidget(button(t, "Replace Friend…", False, lambda: self._replace_friend(d, list(existing.values()))))
+        else:
+            top.addWidget(button(t, "Remove friend", False, lambda: self._remove_friend(d)))
         lay.addLayout(top)
         head = QHBoxLayout()
         head.addWidget(W.Avatar(t, d.get("name", "?"), d.get("avatar", ""), 72))
@@ -641,10 +676,30 @@ class Window(QMainWindow):
         lay.addStretch(1)
         return scroll(inner)
 
-    def _save_friend(self, d):
+    def _save_friend(self, d, replace: dict | None = None):
         from .. import public
-        path = public.save_friend(self.settings, d)
-        self.say(f"Added {d.get('name', 'them')} to your friends ({path.name}).")
+        if replace and replace.get("_file"):
+            Path(replace["_file"]).unlink(missing_ok=True)
+        clean = {k: v for k, v in d.items() if not k.startswith("_")}
+        path = public.save_friend(self.settings, clean)
+        verb = "Updated" if replace and replace.get("name") == d.get("name") else ("Replaced " + replace.get("name", "") + " with") if replace else "Added"
+        self.say(f"{verb} {d.get('name', 'them')}" + ("" if replace else " to your friends") + f" ({path.name}).")
+        QTimer.singleShot(0, self.reload)
+
+    def _replace_friend(self, d, friends: list[dict]):
+        from PySide6.QtWidgets import QInputDialog
+        names = [f.get("name", "?") for f in friends]
+        name, ok = QInputDialog.getItem(self, "Replace Friend", f"Which friend is {d.get('name', 'this')} replacing?",
+                                        names, 0, False)
+        if ok:
+            self._save_friend(d, replace=friends[names.index(name)])
+
+    def _remove_friend(self, d):
+        if QMessageBox.question(self, "Remove friend", f"Remove {d.get('name', 'this friend')} from your friends? "
+                                "(If the folder is synced, it's removed for the others too.)") != QMessageBox.Yes:
+            return
+        Path(d["_file"]).unlink(missing_ok=True)
+        self.go(0)
         QTimer.singleShot(0, self.reload)
 
     # -- library ------------------------------------------------------------------------------------------
@@ -1353,6 +1408,28 @@ class Window(QMainWindow):
         snd.setChecked(s.sounds)
         snd.toggled.connect(lambda v: self._set_live(sounds=v))
         p.layout().addWidget(snd)
+        own = QCheckBox("Rounded window with osmosis' own border (no system title bar)")
+        own.setChecked(s.own_frame)
+        own.toggled.connect(lambda v: self._set_live(own_frame=v))
+        p.layout().addWidget(own)
+        fr_row = QHBoxLayout()
+        fr_row.addWidget(W.label("Border thickness", t, 14, "muted"))
+        bw = QSpinBox()
+        bw.setRange(0, 12)
+        bw.setSuffix(" px")
+        bw.setValue(s.frame_border)
+        bw.valueChanged.connect(lambda v: self._set_live(frame_border=v))
+        fr_row.addWidget(bw)
+        fr_row.addSpacing(24)
+        fr_row.addWidget(W.label("Corner roundness", t, 14, "muted"))
+        rr = QSpinBox()
+        rr.setRange(0, 40)
+        rr.setSuffix(" px")
+        rr.setValue(s.frame_radius)
+        rr.valueChanged.connect(lambda v: self._set_live(frame_radius=v))
+        fr_row.addWidget(rr)
+        fr_row.addStretch(1)
+        p.layout().addLayout(fr_row)
         lay.addWidget(p)
 
         # -- Ribbon ---------------------------------------------------------------
@@ -1394,6 +1471,18 @@ class Window(QMainWindow):
         color.currentIndexChanged.connect(pick_color)
         cr.addWidget(color, 1)
         rb.layout().addLayout(cr)
+        orow = QHBoxLayout()
+        orow.addWidget(W.label("Wave strength", t, 14, "muted"))
+        from PySide6.QtWidgets import QSlider
+        op = QSlider(Qt.Horizontal)
+        op.setRange(0, 200)
+        op.setValue(s.ribbon_opacity)
+        opl = W.label(f"{s.ribbon_opacity}%", t, 13, "muted")
+        opl.setFixedWidth(48)
+        op.valueChanged.connect(lambda v: (opl.setText(f"{v}%"), self._set_live(ribbon_opacity=v)))
+        orow.addWidget(op, 1)
+        orow.addWidget(opl)
+        rb.layout().addLayout(orow)
         dl = QCheckBox("Darker at night, brighter in the day (like the PS3)")
         dl.setChecked(s.ribbon_daylight)
         dl.toggled.connect(lambda v: self._set_live(ribbon_daylight=v))
@@ -1563,6 +1652,22 @@ class Window(QMainWindow):
         lay.addStretch(1)
         return scroll(inner)
 
+    def _apply_frame(self):
+        s = self.settings
+        own = s.own_frame
+        self.backdrop.set_frame(own, s.frame_border, s.frame_radius)
+        full = bool(self.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen))
+        m = 0 if (not own or full) else max(s.frame_border, 6)
+        self._outer.setContentsMargins(m, m if own else 0, m, m)
+        self.titlebar.setVisible(own)
+        self.titlebar.theme = self.theme
+        self.titlebar.update()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == e.Type.WindowStateChange and hasattr(self, "_outer"):
+            self._apply_frame()
+
     def _set_many(self, **kw):
         self._set_live(**kw)
 
@@ -1579,6 +1684,16 @@ class Window(QMainWindow):
         PLAYER.enabled = s.sounds
         self.backdrop.set_theme(self.theme, s.ribbon_month_colors, fixed_color=s.ribbon_color,
                                 daylight=s.ribbon_daylight)
+        self.backdrop.ribbon_strength = s.ribbon_opacity / 100
+        if "own_frame" in kw:
+            geo = self.geometry()
+            self.setWindowFlag(Qt.FramelessWindowHint, s.own_frame)
+            self.setAttribute(Qt.WA_TranslucentBackground, s.own_frame)
+            self.setGeometry(geo)
+            self.show()
+        self._apply_frame()
+        if "frame_radius" in kw or "own_frame" in kw:
+            QApplication.instance().setStyleSheet(qss(self.theme, s.frame_radius if s.own_frame else 0))
         if getattr(self, "xmb", None) is not None:
             try:
                 self.xmb.media_on = s.ribbon_media
@@ -1602,6 +1717,76 @@ class Window(QMainWindow):
     def closeEvent(self, e):
         self.watcher.release()
         super().closeEvent(e)
+
+
+class WinButton(QPushButton):
+    def __init__(self, role, win):
+        super().__init__()
+        self.role, self.win = role, win
+        self.setFixedSize(34, 24)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip({"min": "Minimise", "max": "Maximise", "close": "Close"}[role])
+        self.setStyleSheet("QPushButton { border: none; background: transparent; padding: 0; }")
+
+    def paintEvent(self, _e):
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPainter, QPen
+        t = self.win.theme
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        hover = self.underMouse()
+        if hover:
+            bg = QColor("#d9473d") if self.role == "close" else t.q("accent", 0.25)
+            p.setPen(Qt.NoPen)
+            p.setBrush(bg)
+            p.drawRoundedRect(r.adjusted(3, 2, -3, -2), 6, 6)
+        col = QColor("#ffffff") if hover and self.role == "close" else t.q("text" if hover else "muted")
+        p.setPen(QPen(col, 1.4))
+        c, k = r.center(), 4.5
+        if self.role == "min":
+            p.drawLine(QPointF(c.x() - k, c.y()), QPointF(c.x() + k, c.y()))
+        elif self.role == "max":
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(QRectF(c.x() - k, c.y() - k, 2 * k, 2 * k))
+        else:
+            p.drawLine(QPointF(c.x() - k, c.y() - k), QPointF(c.x() + k, c.y() + k))
+            p.drawLine(QPointF(c.x() + k, c.y() - k), QPointF(c.x() - k, c.y() + k))
+
+
+class TitleBar(QWidget):
+    """Drag to move, double-click to maximise; window buttons on the right."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.theme = None
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 0, 4, 0)
+        lay.setSpacing(0)
+        lay.addStretch(1)
+        for role in ("min", "max", "close"):
+            b = WinButton(role, win)
+            b.clicked.connect(lambda _c=False, r=role: self._act(r))
+            lay.addWidget(b)
+        self.setFixedHeight(26)
+
+    def _act(self, role):
+        if role == "min":
+            self.win.showMinimized()
+        elif role == "max":
+            self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
+        else:
+            self.win.close()
+
+    def mousePressEvent(self, e):
+        h = self.win.windowHandle()
+        if e.button() == Qt.LeftButton and h is not None:
+            h.startSystemMove()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._act("max")
 
 
 class MirrorDialog(QDialog):

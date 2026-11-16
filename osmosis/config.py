@@ -63,7 +63,12 @@ class Settings:
     profile_name: str = ""                  # name shown in osmosis; empty = RPCS3's user name
     profiles_dir: str = ""                  # your public profile + friends' (sync it!); empty = data dir
     own_profile_file: str = ""              # which file in profiles_dir is you
+    profile_id: str = ""                    # random id in your public profile, so osmosis never lists you as a friend
     mirror_saves: bool = True               # keep osmosis' own copy of saves (see mirror.py)
+    own_frame: bool = True                  # rounded window with osmosis' own border (no system title bar)
+    frame_border: int = 2                   # px, 0 = none
+    frame_radius: int = 16                  # px
+    ribbon_opacity: int = 100               # % strength of the Ribbon's waves
     refresher_path: str = ""                # Refresher executable; empty = look on PATH / ~/Applications
     steam: SteamSettings = field(default_factory=SteamSettings)
     auto_export: AutoExport = field(default_factory=AutoExport)

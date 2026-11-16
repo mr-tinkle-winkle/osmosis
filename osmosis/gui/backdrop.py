@@ -75,12 +75,97 @@ class Backdrop(QWidget):
         self.update()
 
     # ------------------------------------------------------------------------------
+    # -- window frame (rounded corners + border) ---------------------------------------------------
+    frame_on = False
+    frame_border = 2
+    frame_radius = 16
+    EDGE = 7
+
+    def set_frame(self, on: bool, border: int, radius: int):
+        self.frame_on, self.frame_border, self.frame_radius = on, max(0, border), max(0, radius)
+        self.setMouseTracking(on)
+        self.update()
+
+    def _square(self) -> bool:
+        w = self.window()
+        return not self.frame_on or bool(w.windowState() & (Qt.WindowMaximized | Qt.WindowFullScreen))
+
+    def _frame_path(self) -> QPainterPath:
+        r = QRectF(self.rect())
+        path = QPainterPath()
+        if self._square():
+            path.addRect(r)
+        else:
+            inset = self.frame_border / 2
+            rad = self.frame_radius
+            path.addRoundedRect(r.adjusted(inset, inset, -inset, -inset), rad, rad)
+        return path
+
+    def _edges(self, pos):
+        if self._square():
+            return Qt.Edges()
+        e = Qt.Edges()
+        x, y, w, h, k = pos.x(), pos.y(), self.width(), self.height(), self.EDGE
+        if x < k:
+            e |= Qt.LeftEdge
+        if x > w - k:
+            e |= Qt.RightEdge
+        if y < k:
+            e |= Qt.TopEdge
+        if y > h - k:
+            e |= Qt.BottomEdge
+        return e
+
+    def mouseMoveEvent(self, e):
+        edges = self._edges(e.position())
+        if edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeFDiagCursor)
+        elif edges in (Qt.RightEdge | Qt.TopEdge, Qt.LeftEdge | Qt.BottomEdge):
+            self.setCursor(Qt.SizeBDiagCursor)
+        elif edges in (Qt.LeftEdge, Qt.RightEdge):
+            self.setCursor(Qt.SizeHorCursor)
+        elif edges in (Qt.TopEdge, Qt.BottomEdge):
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(e)
+
+    def mousePressEvent(self, e):
+        handle = self.window().windowHandle()
+        edges = self._edges(e.position())
+        if e.button() == Qt.LeftButton and handle is not None and edges:
+            handle.startSystemResize(edges)
+            return
+        if e.button() == Qt.LeftButton and handle is not None and self.frame_on:
+            handle.startSystemMove()           # empty margins move the window
+            return
+        super().mousePressEvent(e)
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        self.update()
+
     def paintEvent(self, _e):
         t = self._theme
         if not t:
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        frame = self._frame_path()
+        if self.frame_on:
+            p.setClipPath(frame)
+        self._paint_body(p)
+        if self.frame_on and not self._square() and self.frame_border > 0:
+            p.setClipping(False)
+            col = t.q("accent")
+            col.setAlphaF(0.75)
+            p.setPen(QPen(col, self.frame_border))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(frame)
+        p.end()
+
+    def _paint_body(self, p):
+        t = self._theme
         kind = t.backdrop
         if kind == "ribbon":
             self._paint_ribbon(p)
@@ -89,7 +174,6 @@ class Backdrop(QWidget):
             self._paint_terminal_scan(p)
         else:
             self._paint_static(p)
-        p.end()
 
     # -- static themes (cached) ----------------------------------------------------
     def _paint_static(self, p: QPainter):
@@ -304,7 +388,7 @@ class Backdrop(QWidget):
             bob = math.sin(t * 0.25 + p1) * h * 0.012
             top = [y0 + bob + a1 * math.sin(k * x + p1 + ph) + a1 * 0.25 * math.sin(2.3 * k * x + p2 - ph * 0.7) for x in xs]
             bot = [y0 + bob + th + a1 * 0.8 * math.sin(k * x + p2 + ph * 1.15) for x in xs]
-            peak = 255 * alpha * 1.9
+            peak = 255 * alpha * 1.9 * getattr(self, "ribbon_strength", 1.0)
             g = QLinearGradient(0, 0, 0, 1)
             for f, v in stops:
                 g.setColorAt(f, QColor(255, 255, 255, max(0, min(255, int(peak * v)))))
@@ -320,15 +404,17 @@ class Backdrop(QWidget):
                 q.drawPolygon(QPolygonF([QPointF(x0, top[j]), QPointF(x1, top[j + 1]),
                                          QPointF(x1, bot[j + 1]), QPointF(x0, bot[j])]))
             edges.append(QPolygonF([QPointF(x, y) for x, y in zip(xs, top)]))
+        # A soft highlight along two of the bands' top edges, drawn into the low-res image so the
+        # upscale blurs it: a glow along the fold of the ribbon, not a hard spline.
+        q.setRenderHint(QPainter.Antialiasing, True)
+        q.setBrush(Qt.NoBrush)
+        strength = getattr(self, "ribbon_strength", 1.0)
+        for i, a in ((2, 0.16), (1, 0.10)):
+            q.setPen(QPen(QColor(255, 255, 255, int(255 * a * strength)), 9, Qt.SolidLine, Qt.RoundCap))
+            q.drawPolyline(edges[i])
         q.end()
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.drawImage(QRectF(0, 0, w, h), img)
-
-        # crisp sheen on two edges
-        p.setBrush(Qt.NoBrush)
-        for i, alpha in ((2, 0.38), (1, 0.22)):
-            p.setPen(QPen(QColor(255, 255, 255, int(255 * alpha)), 1.6))
-            p.drawPolyline(edges[i])
 
         # sparkles
         p.setPen(Qt.NoPen)
@@ -337,5 +423,5 @@ class Backdrop(QWidget):
             a = math.sin(ph * math.pi) ** 2
             x = ((x0 + drift * (t + off)) % 1.0) * w
             y = (y0 - 0.02 * ph) * h
-            p.setBrush(QColor(255, 255, 255, int(200 * a)))
+            p.setBrush(QColor(255, 255, 255, int(200 * a * min(1.0, getattr(self, "ribbon_strength", 1.0)))))
             p.drawEllipse(QPointF(x, y), rad, rad)

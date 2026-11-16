@@ -46,6 +46,16 @@ def display_name(settings: config.Settings, profile=None) -> str:
     return "Player"
 
 
+def my_id(settings: config.Settings) -> str:
+    if not settings.profile_id:
+        import uuid
+        s = config.load()
+        s.profile_id = s.profile_id or uuid.uuid4().hex
+        config.save(s)
+        settings.profile_id = s.profile_id
+    return settings.profile_id
+
+
 def build(profile, settings: config.Settings) -> dict:
     av = avatar_path()
     games = []
@@ -64,6 +74,7 @@ def build(profile, settings: config.Settings) -> dict:
     return {
         "format": "osmosis-profile",
         "version": 1,
+        "id": my_id(settings),
         "name": display_name(settings, profile),
         "avatar": base64.b64encode(av.read_bytes()).decode() if av.is_file() else "",
         "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -112,6 +123,13 @@ def write_own(settings: config.Settings, d: dict) -> Path | None:
         old = settings.own_profile_file
         if old and old != path.name:
             (folder / old).unlink(missing_ok=True)       # renamed: don't leave yourself behind as a "friend"
+        for f in folder.glob("*" + SUFFIX):              # ...even if the settings file forgot the old name
+            if f.name != path.name:
+                try:
+                    if json.loads(f.read_text(encoding="utf-8")).get("id") == d.get("id"):
+                        f.unlink()
+                except (OSError, ValueError):
+                    pass
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, indent=1), encoding="utf-8")
         tmp.replace(path)
@@ -140,12 +158,15 @@ def friends(settings: config.Settings) -> list[dict]:
     out = []
     if not folder.is_dir():
         return out
+    mine = settings.profile_id
     for f in sorted(folder.glob("*" + SUFFIX)):
         if f.name == settings.own_profile_file:
             continue
         try:
             d = decode(f.read_text(encoding="utf-8"))
         except (OSError, ValueError, zlib.error):
+            continue
+        if mine and d.get("id") == mine:
             continue
         d["_file"] = str(f)
         out.append(d)

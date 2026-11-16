@@ -67,7 +67,7 @@ def test_public_profile_roundtrip_and_friends(tmp_path):
     # profiles folder: mine + a friend's
     mine = public.write_own(s, d)
     assert mine.name == "mrtw.osmosis.json"
-    friend = dict(d, name="Apple")
+    friend = dict(d, name="Apple", id="someone-else")
     (tmp_path / "shared" / "Apple.osmosis.json").write_text(json.dumps(friend))
     fr = public.friends(config.load())
     assert [f["name"] for f in fr] == ["Apple"]
@@ -76,3 +76,19 @@ def test_public_profile_roundtrip_and_friends(tmp_path):
     s2.profile_name = "mrtw2"
     public.write_own(s2, dict(d, name="mrtw2"))
     assert sorted(f.name for f in (tmp_path / "shared").iterdir()) == ["Apple.osmosis.json", "mrtw2.osmosis.json"]
+
+
+def test_never_your_own_friend(tmp_path):
+    cfg = make_rpcs3(tmp_path)
+    s = config.Settings(rpcs3_config_dir=str(cfg), profile_name="mrtw", profiles_dir=str(tmp_path / "shared"))
+    config.save(s)
+    d = public.build(load_profile(s), s)
+    public.write_own(s, d)
+    s2 = config.load()
+    s2.own_profile_file = ""                  # settings forgot which file is mine
+    config.save(s2)
+    assert public.friends(config.load()) == []
+    s3 = config.load()
+    s3.profile_name = "renamed"
+    public.write_own(s3, dict(d, name="renamed"))   # old file with my id is cleaned up
+    assert [f.name for f in (tmp_path / "shared").iterdir()] == ["renamed.osmosis.json"]

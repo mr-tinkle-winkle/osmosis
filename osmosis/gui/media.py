@@ -27,12 +27,15 @@ from PySide6.QtGui import QImage
 from .. import config
 
 try:
-    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+    from PySide6.QtMultimedia import (QAudioFormat, QAudioOutput, QAudioSink, QMediaDevices, QMediaPlayer,
+                                      QVideoSink)
     HAVE_QTMM = True
 except Exception:  # pragma: no cover
     HAVE_QTMM = False
 
-CACHE_VERSION = "v2"
+CACHE_VERSION = "v3"
+PCM_RATE = 48000          # music is decoded to raw 16-bit stereo at this rate
+FRAME = 4                 # bytes per stereo s16 frame
 
 
 def cache_dir(serial: str) -> Path:
@@ -50,45 +53,35 @@ def log(msg: str):
 
 
 # -- PAMF -------------------------------------------------------------------------------------
+_VIDEO_PES = __import__("re").compile(rb"\x00\x00\x01[\xe0-\xef]")
+
+
 def pamf_extract_h264(data: bytes) -> bytes:
-    """Concatenate the payloads of video PES packets (stream 0xE0..0xEF) from a PAMF file."""
+    """Raw H.264 from a PAMF file.
+
+    PAMF (see RPCS3's cellPamf.h / cellDmuxPamf.cpp): a header whose size is given in
+    2048-byte units, then 2048-byte packs, each holding one PES packet (optionally after a
+    system header + private stream 2). The system header's length field doesn't reliably
+    land on the next start code, so each pack is *searched* for its video PES (stream
+    0xE0-0xEF) instead of walking lengths -- walking them skipped the key frames."""
     start = 0
-    if data[:4] == b"PAMF" and len(data) >= 12:
-        units = struct.unpack(">I", data[8:12])[0]
+    if data[:4] == b"PAMF" and len(data) >= 16:
+        units = int.from_bytes(data[8:12], "big")
         if 0 < units * 2048 < len(data):
             start = units * 2048
-    i = data.find(b"\x00\x00\x01\xba", start)
-    if i < 0:
-        i = start
     out = bytearray()
-    n = len(data)
-    while i + 4 <= n:
-        if data[i:i + 3] != b"\x00\x00\x01":
-            j = data.find(b"\x00\x00\x01", i + 1)
-            if j < 0:
-                break
-            i = j
+    for sec in range(start, len(data), 2048):
+        pack = data[sec:sec + 2048]
+        m = _VIDEO_PES.search(pack, 4)
+        if not m:
             continue
-        sid = data[i + 3]
-        if sid == 0xBA:                                   # pack header
-            if i + 14 > n:
-                break
-            if (data[i + 4] & 0xC0) == 0x40:              # MPEG-2
-                stuffing = data[i + 13] & 0x07
-                i += 14 + stuffing
-            else:                                         # MPEG-1
-                i += 12
+        i = m.start()
+        if i + 9 > len(pack):
             continue
-        if sid == 0xB9:                                   # end code
-            break
-        if i + 6 > n:
-            break
-        length = struct.unpack(">H", data[i + 4:i + 6])[0]
-        body = data[i + 6:i + 6 + length]
-        if 0xE0 <= sid <= 0xEF and len(body) >= 3 and (body[0] & 0xC0) == 0x80:
-            hdr = body[2]
-            out += body[3 + hdr:]
-        i += 6 + length
+        length = int.from_bytes(pack[i + 4:i + 6], "big")
+        body = data[sec + i + 6: sec + i + 6 + length]
+        if len(body) >= 3 and (body[0] & 0xC0) == 0x80:
+            out += body[3 + body[2]:]
     return bytes(out)
 
 
@@ -146,14 +139,12 @@ def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
     if game.music:
         raw = game.music.read_bytes()
         loop = at3_loop(raw)
-        out = d / "music.ogg"
+        out = d / "music.s16"
         if not out.is_file():
-            tmp = d / "music.tmp.ogg"
-            if _ff([ff, "-y", "-loglevel", "error", "-i", str(game.music), "-vn", "-c:a", "libvorbis", "-q:a", "6", str(tmp)]):
+            tmp = d / "music.tmp.s16"
+            if _ff([ff, "-y", "-loglevel", "error", "-i", str(game.music), "-vn", "-f", "s16le", "-acodec", "pcm_s16le",
+                    "-ac", "2", "-ar", str(PCM_RATE), str(tmp)]):
                 tmp.replace(out)
-            elif _ff([ff, "-y", "-loglevel", "error", "-i", str(game.music), "-vn", "-c:a", "flac",
-                      str(d / "music.tmp.flac")]):
-                (d / "music.tmp.flac").replace(out)
         music = out if out.is_file() else None
         log(f"{game.serial}: SND0 -> {'ok' if music else 'FAILED'}; loop {loop}")
     else:
@@ -184,52 +175,85 @@ def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
     return music, video, loop
 
 
+if HAVE_QTMM:
+    from PySide6.QtCore import QIODevice
+
+    class _LoopDevice(QIODevice):
+        """Feeds decoded PCM to the sound card: the intro once, then [loop_start, loop_end)
+        forever, joined sample-accurately -- no seeking, so no hiccup at the loop point."""
+
+        def __init__(self, pcm: bytes, loop: "Loop | None", parent=None):
+            super().__init__(parent)
+            self.pcm = pcm
+            n = len(pcm) - len(pcm) % FRAME
+            if loop:
+                ls = int(loop.start_ms * PCM_RATE / 1000) * FRAME
+                le = int(loop.end_ms * PCM_RATE / 1000) * FRAME
+            else:
+                ls, le = 0, n
+            self.ls = max(0, min(ls, n - FRAME))
+            self.le = max(self.ls + FRAME, min(le, n))
+            self.pos = 0
+
+        def isSequential(self):
+            return True
+
+        def bytesAvailable(self):
+            return 1 << 20
+
+        def readData(self, maxlen):
+            out = bytearray()
+            maxlen -= maxlen % FRAME
+            while len(out) < maxlen:
+                take = min(maxlen - len(out), self.le - self.pos)
+                out += self.pcm[self.pos:self.pos + take]
+                self.pos += take
+                if self.pos >= self.le:
+                    self.pos = self.ls
+            return bytes(out)
+
+        def writeData(self, _data):
+            return -1
+
+
 class _Track(QObject):
-    """One music player that can fade in and out on its own, so the previous game's
+    """One game's music on its own audio sink, with its own fades, so the previous game's
     music fades away while the next one fades up -- never a hard cut."""
 
-    def __init__(self, path: Path, loop: Loop | None, parent):
+    def __init__(self, pcm_path: Path, loop: Loop | None, parent):
         super().__init__(parent)
-        self.loop = loop
-        self.out = QAudioOutput(self)
-        self.out.setVolume(0.0)
-        self.player = QMediaPlayer(self)
-        self.player.setAudioOutput(self.out)
-        self.player.mediaStatusChanged.connect(self._status)
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.target = 0.0
-        self.step = 0.04
+        fmt = QAudioFormat()
+        fmt.setSampleRate(PCM_RATE)
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.Int16)
+        self.dev = _LoopDevice(pcm_path.read_bytes(), loop, self)
+        self.dev.open(QIODevice.ReadOnly)
+        self.sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt, self)
+        self.sink.setVolume(0.0)
+        self.target, self.step, self.dead = 0.0, 0.04, False
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(25)
-        self.dead = False
+
+    def play(self):
+        self.sink.start(self.dev)
 
     def fade_to(self, v: float, seconds: float):
         self.target = v
-        self.step = max(0.005, abs(v - self.out.volume()) / max(1, seconds / 0.025))
+        self.step = max(0.004, abs(v - self.sink.volume()) / max(1, seconds / 0.025))
 
     def _tick(self):
-        # volume ramp
-        v = self.out.volume()
+        v = self.sink.volume()
         if abs(v - self.target) > 1e-3:
             v = min(self.target, v + self.step) if v < self.target else max(self.target, v - self.step)
-            self.out.setVolume(v)
+            self.sink.setVolume(v)
         elif self.target == 0.0 and self.dead:
             self._timer.stop()
-            self.player.stop()
+            self.sink.stop()
+            self.dev.close()
             self.deleteLater()
-            return
-        # loop region, checked every 25 ms (position signals can be too coarse)
-        l = self.loop
-        if l and self.player.position() >= l.end_ms - 20:
-            self.player.setPosition(l.start_ms)
 
-    def _status(self, status):
-        if status == QMediaPlayer.EndOfMedia and not self.dead:
-            self.player.setPosition(self.loop.start_ms if self.loop else 0)
-            self.player.play()
-
-    def retire(self, seconds=0.45):
+    def retire(self, seconds=0.5):
         self.dead = True
         self.fade_to(0.0, seconds)
 
@@ -285,9 +309,12 @@ class GameMedia(QObject):
         if not self._made or self.serial is None:
             return
         if music:
-            self._track = _Track(music, loop, self)
-            self._track.player.play()
-            self._track.fade_to(self._target, 1.2)
+            try:
+                self._track = _Track(music, loop, self)
+                self._track.play()
+                self._track.fade_to(self._target, 1.2)
+            except Exception as e:
+                log(f"music playback failed: {e}")
         if video:
             self._video.setSource(QUrl.fromLocalFile(str(video)))
             self._video.play()

@@ -93,8 +93,16 @@ def test_pamf_and_at3_parsers():
         body = hdr + payload
         return b"\x00\x00\x01" + bytes([sid]) + struct.pack(">H", len(body)) + body
 
-    pack = b"\x00\x00\x01\xba" + b"\x44\x00\x04\x00\x04\x01\x01\x89\xc3\xf8"
-    stream = pack + pes(0xE0, es[:60]) + pes(0xBD, b"audio") + pack + pes(0xE0, es[60:]) + b"\x00\x00\x01\xb9"
+    def sector(*parts):
+        body = b"\x00\x00\x01\xba" + b"\x44\x00\x04\x00\x04\x01\x01\x89\xc3\xf8" + b"".join(parts)
+        pad = 2048 - len(body)
+        return body + b"\x00\x00\x01\xbe" + struct.pack(">H", pad - 6) + b"\xff" * (pad - 6)
+
+    # first pack: a system header whose length field is short by 6 bytes (real PAMF
+    # quirk), then private stream 2, then the key-frame PES -- the one that used to be lost
+    sys_hdr = b"\x00\x00\x01\xbb" + struct.pack(">H", 12) + b"\x80" * 18
+    ps2 = b"\x00\x00\x01\xbf" + struct.pack(">H", 4) + b"\x00\xe0\x00\x00"
+    stream = sector(sys_hdr, ps2, pes(0xE0, es[:60])) + sector(pes(0xBD, b"audio")) + sector(pes(0xE0, es[60:]))
     pamf = b"PAMF0041" + struct.pack(">I", 1) + b"\x00" * (2048 - 12) + stream
     assert pamf_extract_h264(pamf) == es
 
@@ -124,3 +132,18 @@ def test_refresher_command(tmp_path, monkeypatch):
     app2.write_bytes(b"x")
     from osmosis import config
     assert lbp.find_refresher(config.Settings()) == str(app2)
+
+
+def test_loop_device_is_seamless():
+    pytest = __import__("pytest")
+    pytest.importorskip("PySide6.QtMultimedia")
+    from osmosis.gui import media
+    # 10 frames of audio, loop over frames 4..8
+    pcm = b"".join(i.to_bytes(2, "little") * 2 for i in range(10))
+    loop = media.Loop(start_ms=int(4 * 1000 / media.PCM_RATE) + 1, end_ms=int(8 * 1000 / media.PCM_RATE) + 1)
+    loop = media.Loop(0, 0)
+    d = media._LoopDevice(pcm, None)
+    d.ls, d.le = 4 * 4, 8 * 4
+    out = d.readData(4 * 16)
+    frames = [int.from_bytes(out[i:i + 2], "little") for i in range(0, len(out), 4)]
+    assert frames == [0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7, 4, 5, 6, 7]

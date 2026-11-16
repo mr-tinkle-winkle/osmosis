@@ -289,14 +289,58 @@ VARIANTS = {
     },
 }
 CHOICES: dict[str, str] = {}   # "set:event" -> variant; filled from settings by the window
+DEFAULTS = {"ribbon:nav": "Sonar", "ribbon:select": "Bloom", "ribbon:done": "Fanfare", "ribbon:error": "Wobble"}
+CUSTOM = "Custom: "
+
+
+def custom_dir(set_name: str, event: str) -> Path:
+    return config.data_dir() / "sounds" / "custom" / set_name / event
 
 
 def options(set_name: str, event: str) -> list[str]:
-    return list(VARIANTS.get(set_name, {}).get(event, {}))
+    built = list(VARIANTS.get(set_name, {}).get(event, {})) or ["Default"]
+    d = custom_dir(set_name, event)
+    mine = [CUSTOM + f.stem for f in sorted(d.glob("*.wav"))] if d.is_dir() else []
+    return built + mine
+
+
+def current(set_name: str, event: str) -> str:
+    return CHOICES.get(f"{set_name}:{event}") or DEFAULTS.get(f"{set_name}:{event}") or options(set_name, event)[0]
+
+
+def import_custom(set_name: str, event: str, src: Path) -> str:
+    """Copy one of your own sound files in (converted to WAV with ffmpeg if needed).
+    Returns its option name."""
+    import shutil
+    import subprocess
+    d = custom_dir(set_name, event)
+    d.mkdir(parents=True, exist_ok=True)
+    stem = "".join(c for c in src.stem if c.isalnum() or c in " -_")[:40] or "sound"
+    dst = d / f"{stem}.wav"
+    n = 2
+    while dst.exists():
+        dst = d / f"{stem} {n}.wav"
+        n += 1
+    ff = shutil.which("ffmpeg")
+    if ff:
+        r = subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(src), "-t", "10", "-ac", "2", "-ar", "44100",
+                            "-c:a", "pcm_s16le", str(dst)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            raise ValueError("couldn't read that file: " + r.stderr.decode("utf-8", "replace").strip()[-200:])
+    elif src.suffix.lower() == ".wav":
+        shutil.copy2(src, dst)
+    else:
+        raise ValueError("only .wav files can be added without ffmpeg")
+    return CUSTOM + dst.stem
 
 
 def sound_file(set_name: str, event: str, variant: str | None = None) -> Path | None:
-    variant = variant if variant is not None else CHOICES.get(f"{set_name}:{event}", "")
+    variant = variant if variant is not None else current(set_name, event)
+    if variant and variant.startswith(CUSTOM):
+        f = custom_dir(set_name, event) / (variant[len(CUSTOM):] + ".wav")
+        if f.is_file():
+            return f
+        variant = DEFAULTS.get(f"{set_name}:{event}", "")
     gen = VARIANTS.get(set_name, {}).get(event, {}).get(variant) if variant else None
     gen = gen or SETS.get(set_name, {}).get(event)
     if not gen:

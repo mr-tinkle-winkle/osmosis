@@ -142,6 +142,13 @@ class Watcher:
             con.close()
         log.info("session recorded: %s %.1f min", live.serial, played / 60000)
         settings = self._load_settings()
+        try:  # record the new progress in osmosis' own copy (never prompts here)
+            from . import mirror
+            rp = open_rpcs3(settings)
+            if rp and not self._processes():
+                mirror.refresh(rp, settings)
+        except Exception as e:
+            log.warning("mirror refresh failed: %s", e)
         if settings.auto_export.trigger == "session":
             self._run_auto_export(settings)
         if self._on_end:

@@ -423,3 +423,38 @@ class Blink(QLabel):
     def _tick(self):
         self._on = not self._on
         self.setText("█" if self._on else " ")
+
+
+class Avatar(QWidget):
+    """Round picture (from a file or base64 PNG/JPEG) or the name's first letter."""
+
+    def __init__(self, theme: Theme, name: str, image=None, size: int = 72, parent=None):
+        super().__init__(parent)
+        import base64
+        self.theme, self.name = theme, name
+        self.setFixedSize(size, size)
+        self._pm = QPixmap()
+        try:
+            if isinstance(image, (str, Path)) and Path(image).is_file():
+                self._pm = QPixmap(str(image))
+            elif isinstance(image, str) and image:
+                self._pm.loadFromData(base64.b64decode(image))
+        except Exception:
+            self._pm = QPixmap()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        rad = r.width() / 2 if self.theme.radius >= 8 else self.theme.radius
+        path = QPainterPath()
+        path.addRoundedRect(r, rad, rad)
+        p.setClipPath(path)
+        if not self._pm.isNull():
+            p.drawPixmap(r.toRect(), scaled_crop(self._pm, r.size().toSize()))
+        else:
+            p.fillRect(r, self.theme.q("accent"))
+            p.setPen(self.theme.q("accent_text"))
+            p.setFont(font(self.theme, int(r.height() * 0.42), display=True, bold=True))
+            p.drawText(r, Qt.AlignCenter, (self.name[:1] or "?").upper())

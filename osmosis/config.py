@@ -60,6 +60,10 @@ class Settings:
     ribbon_color: str = "#1d4fa3"           # used when ribbon_month_colors is off
     ribbon_daylight: bool = True            # dim by time of day, like the PS3
     sound_choices: dict = field(default_factory=dict)   # "set:event" -> variant name
+    profile_name: str = ""                  # name shown in osmosis; empty = RPCS3's user name
+    profiles_dir: str = ""                  # your public profile + friends' (sync it!); empty = data dir
+    own_profile_file: str = ""              # which file in profiles_dir is you
+    mirror_saves: bool = True               # keep osmosis' own copy of saves (see mirror.py)
     refresher_path: str = ""                # Refresher executable; empty = look on PATH / ~/Applications
     steam: SteamSettings = field(default_factory=SteamSettings)
     auto_export: AutoExport = field(default_factory=AutoExport)

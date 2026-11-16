@@ -7,7 +7,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, QThread, QTimer, Signal, Slot
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QColor, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget,
@@ -235,6 +235,36 @@ class Window(QMainWindow):
         self.steamlib = steam.SteamLibrary.detect(self.settings)
         W.clear_cover_cache()
         self.build()
+        if self.profile and self.profile.rpcs3:
+            from .. import public
+            try:
+                public.write_own(self.settings, public.build(self.profile, self.settings))
+            except Exception as e:
+                print("public profile:", e, file=sys.stderr)
+            QTimer.singleShot(300, self.check_mirror)
+
+    # -- osmosis' record vs RPCS3 -----------------------------------------------------------------------
+    def check_mirror(self):
+        """Fold RPCS3's progress into osmosis' record; if RPCS3 is *behind* it, ask."""
+        from .. import mirror
+        rp = self.profile.rpcs3 if self.profile else None
+        if not rp or backup.rpcs3_running() or getattr(self, "_mirror_busy", False):
+            return
+        self._mirror_busy = True
+        titles = self.profile.titles()
+        settings = self.settings
+
+        def done(diffs):
+            self._mirror_busy = False
+            diffs = [d for d in diffs if (d.kind, d.key) not in getattr(self, "_mirror_snoozed", set())]
+            if diffs:
+                MirrorDialog(self, self.theme, rp, diffs).exec()
+
+        def fail(err):
+            self._mirror_busy = False
+            print("mirror:", err, file=sys.stderr)
+
+        run_bg(self, lambda _p: mirror.refresh(rp, settings, titles), done, fail)
 
     def _watch_tick(self):
         if not self._owns_watcher:
@@ -276,6 +306,13 @@ class Window(QMainWindow):
 
     # -- layout -----------------------------------------------------------------------------------------
     def build(self):
+        keep = None
+        try:
+            cur = self.stack.currentWidget()
+            if isinstance(cur, QScrollArea) and self.stack.currentIndex() < getattr(self, "n_pages", 0):
+                keep = (self.stack.currentIndex(), cur.verticalScrollBar().value())
+        except (AttributeError, RuntimeError):
+            pass
         old = self.backdrop.layout()
         if old:
             QWidget().setLayout(old)  # reparent+discard the previous tree
@@ -350,6 +387,10 @@ class Window(QMainWindow):
             self.stack.setCurrentIndex(self.page_index)
         root.addWidget(self.stack, 1)
         self.toast.raise_()
+        if keep and keep[0] == self.stack.currentIndex():
+            w = self.stack.currentWidget()
+            if isinstance(w, QScrollArea):
+                QTimer.singleShot(0, lambda: w.verticalScrollBar().setValue(keep[1]))
 
     def _status_text(self) -> str:
         if not self.profile or not self.profile.rpcs3:
@@ -441,15 +482,10 @@ class Window(QMainWindow):
             self._no_rpcs3(lay)
             lay.addStretch(1)
             return scroll(inner)
-        name = _local_username(p) or "Player"
+        from .. import public
+        name = public.display_name(self.settings, p)
         head = QHBoxLayout()
-        avatar = QLabel(name[:1].upper())
-        avatar.setFixedSize(72, 72)
-        avatar.setAlignment(Qt.AlignCenter)
-        avatar.setFont(W.font(t, 30, display=True, bold=True))
-        avatar.setStyleSheet(f"background: {t.c.accent}; color: {t.c.accent_text}; "
-                             f"border-radius: {36 if t.radius >= 8 else t.radius}px;")
-        head.addWidget(avatar)
+        head.addWidget(W.Avatar(t, name, public.avatar_path(), 72))
         col = QVBoxLayout()
         col.setSpacing(2)
         col.addWidget(h1(t, name, 32))
@@ -458,6 +494,10 @@ class Window(QMainWindow):
                               f"{p.trophies_unlocked} / {p.trophies_total} {t.w('trophies').lower()}", t, 15, "muted"))
         head.addLayout(col, 1)
         head.addSpacing(16)
+        share = QVBoxLayout()
+        share.addWidget(button(t, "Copy Public Info", False, self.copy_public))
+        share.addWidget(button(t, "View Copied Public Info", False, self.view_copied_public))
+        head.addLayout(share)
         lay.addLayout(head)
 
         tiles = QGridLayout()
@@ -480,9 +520,132 @@ class Window(QMainWindow):
             card.clicked.connect(lambda _=False, s=e.serial: self.open_game(s))
             cards.append(card)
         lay.addWidget(FlowGrid(cards))
+
+        # friends: every other profile in the profiles folder
+        fr = public.friends(self.settings)
+        lay.addWidget(section(t, f"Friends ({len(fr)})"))
+        if fr:
+            grid = QGridLayout()
+            grid.setSpacing(12)
+            for i, d in enumerate(fr[:12]):
+                b = QPushButton()
+                b.setCursor(Qt.PointingHandCursor)
+                b.setMinimumHeight(76)
+                bl = QHBoxLayout(b)
+                bl.setContentsMargins(12, 8, 12, 8)
+                bl.addWidget(W.Avatar(t, d.get("name", "?"), d.get("avatar", ""), 52))
+                tt = d.get("totals", {})
+                txt = QVBoxLayout()
+                txt.addWidget(W.label(d.get("name", "?"), t, 15, bold=True))
+                txt.addWidget(W.label(f"{tt.get('games', 0)} {t.w('games')} · {W.hours(tt.get('playtime_ms', 0))} · "
+                                      f"{tt.get('unlocked', 0)} {t.w('trophies').lower()}", t, 12, "muted"))
+                bl.addLayout(txt, 1)
+                b.clicked.connect(lambda _=False, d=d: self.open_friend(d))
+                grid.addWidget(b, i // 3, i % 3)
+            lay.addLayout(grid)
+        else:
+            lay.addWidget(W.label(f"Put friends' profile files in {public.profiles_dir(self.settings)} (or sync that "
+                                  "folder with them, e.g. with Syncthing) and they'll show up here. Yours is kept "
+                                  "there too.", t, 13, "muted", wrap=True))
         lay.addStretch(1)
         lay.addWidget(self.export_bar())
         return scroll(inner)
+
+    # -- public profiles ------------------------------------------------------------------------------
+    def _public(self) -> dict:
+        from .. import public
+        return public.build(self.profile, self.settings)
+
+    def copy_public(self):
+        from .. import public
+        from PySide6.QtGui import QGuiApplication
+        QGuiApplication.clipboard().setText(public.encode(self._public()))
+        self.say("Copied your public info — send it to a friend; they paste it with “View Copied Public Info”.")
+
+    def view_copied_public(self):
+        from .. import public
+        from PySide6.QtGui import QGuiApplication
+        try:
+            d = public.decode(QGuiApplication.clipboard().text())
+        except Exception:
+            self.say("The clipboard doesn't hold osmosis public info. Ask your friend to press “Copy Public Info”.",
+                     sound="error")
+            return
+        self.open_friend(d)
+
+    def open_friend(self, d: dict):
+        PLAYER.play("nav")
+        self._drop_detail()
+        self.detail_serial = None
+        self.stack.addWidget(self.page_friend(d))
+        self.stack.setCurrentIndex(self.n_pages)
+        self._check_nav(0)
+
+    def page_friend(self, d: dict):
+        from .. import public
+        t = self.theme
+        inner, lay = self._page()
+        top = QHBoxLayout()
+        top.addWidget(button(t, "‹ " + t.w("profile"), False, lambda: self.go(0)))
+        top.addStretch(1)
+        if "_file" not in d:
+            top.addWidget(button(t, "Add to friends", True, lambda: self._save_friend(d)))
+        lay.addLayout(top)
+        head = QHBoxLayout()
+        head.addWidget(W.Avatar(t, d.get("name", "?"), d.get("avatar", ""), 72))
+        col = QVBoxLayout()
+        col.addWidget(h1(t, d.get("name", "?"), 32))
+        upd = d.get("updated", "")[:16].replace("T", " ")
+        tt = d.get("totals", {})
+        col.addWidget(W.label(f"{tt.get('games', 0)} {t.w('games')} · {W.hours(tt.get('playtime_ms', 0))} · "
+                              f"{tt.get('unlocked', 0)} / {tt.get('total', 0)} {t.w('trophies').lower()} · updated {upd}",
+                              t, 15, "muted"))
+        head.addLayout(col, 1)
+        lay.addLayout(head)
+        g = tt.get("grades", {})
+        tiles = QGridLayout()
+        tiles.setSpacing(12)
+        for i, (k, v) in enumerate([(t.w("games").title(), str(tt.get("games", 0))),
+                                    ("Time played", W.hours(tt.get("playtime_ms", 0))),
+                                    (t.w("trophies"), f"{tt.get('unlocked', 0)} / {tt.get('total', 0)}"),
+                                    ("Platinum · Gold · Silver · Bronze",
+                                     f"{g.get('platinum', 0)} · {g.get('gold', 0)} · {g.get('silver', 0)} · {g.get('bronze', 0)}")]):
+            tile = W.Panel(pad=14, spacing=2)
+            tile.layout().addWidget(W.label(k, t, 12, "muted"))
+            tile.layout().addWidget(W.label(v, t, 26, display=True, bold=True))
+            tiles.addWidget(tile, 0, i)
+        lay.addLayout(tiles)
+        mine = {e.serial: e for e in (self.profile.entries if self.profile else [])}
+        lay.addWidget(section(t, t.w("games")))
+        for gm in sorted(d.get("games", []), key=lambda x: x.get("playtime_ms", 0), reverse=True):
+            row = W.Panel(pad=10, spacing=14, horizontal=True)
+            e = mine.get(gm.get("serial"))
+            pic = QLabel()
+            size = QSize(116, 64)
+            if e:
+                pic.setPixmap(W.scaled_crop(QPixmap(str(e.game.icon)), size) if e.game.icon else
+                              W.placeholder_cover(gm.get("title", "?"), size, t))
+            else:
+                pic.setPixmap(W.placeholder_cover(gm.get("title", "?"), size, t))
+            row.layout().addWidget(pic)
+            c2 = QVBoxLayout()
+            c2.addWidget(W.label(gm.get("title", "?"), t, 15, bold=True))
+            extra = ""
+            if e and e.trophies and gm.get("total"):
+                extra = f"   ·   you: {e.percent}%"
+            c2.addWidget(W.label(f"{W.hours(gm.get('playtime_ms', 0))} · {gm.get('unlocked', 0)}/{gm.get('total', 0)} "
+                                 f"{t.w('trophies').lower()}{extra}", t, 12, "muted"))
+            c2.addWidget(W.Bar(t, gm.get("percent", 0), 6))
+            row.layout().addLayout(c2, 1)
+            lay.addWidget(row)
+        lay.addStretch(1)
+        return scroll(inner)
+
+    def _save_friend(self, d):
+        from .. import public
+        path = public.save_friend(self.settings, d)
+        self.say(f"Added {d.get('name', 'them')} to your friends ({path.name}).")
+        QTimer.singleShot(0, self.reload)
 
     # -- library ------------------------------------------------------------------------------------------
     def page_library(self):
@@ -859,6 +1022,12 @@ class Window(QMainWindow):
             msg += "."
             action = ("Previous files", lambda: W.open_folder(res.safety_copy)) if res.safety_copy else None
             self.say(msg, action)
+            # You chose to restore this backup, so osmosis' record follows it (no "RPCS3 is behind" prompt).
+            from .. import mirror
+            try:
+                mirror.accept(rp, mirror.refresh(rp, self.settings, self.profile.titles()))
+            except Exception as e:
+                print("mirror after restore:", e, file=sys.stderr)
             QTimer.singleShot(0, self.reload)
 
         run_bg(self, work, done, lambda err: self.say(f"Restore failed: {err}", sound="error"))
@@ -1182,7 +1351,7 @@ class Window(QMainWindow):
         p.layout().addWidget(dark)
         snd = QCheckBox("Theme sounds")
         snd.setChecked(s.sounds)
-        snd.toggled.connect(lambda v: self._set("sounds", v, retheme=True))
+        snd.toggled.connect(lambda v: self._set_live(sounds=v))
         p.layout().addWidget(snd)
         lay.addWidget(p)
 
@@ -1227,11 +1396,11 @@ class Window(QMainWindow):
         rb.layout().addLayout(cr)
         dl = QCheckBox("Darker at night, brighter in the day (like the PS3)")
         dl.setChecked(s.ribbon_daylight)
-        dl.toggled.connect(lambda v: self._set("ribbon_daylight", v, retheme=True))
+        dl.toggled.connect(lambda v: self._set_live(ribbon_daylight=v))
         rb.layout().addWidget(dl)
         md = QCheckBox("Play each game's menu music and animated icon when you rest on it (needs ffmpeg)")
         md.setChecked(s.ribbon_media)
-        md.toggled.connect(lambda v: self._set("ribbon_media", v, retheme=True))
+        md.toggled.connect(lambda v: self._set_live(ribbon_media=v))
         rb.layout().addWidget(md)
         pr = QHBoxLayout()
         pr.addWidget(W.label("Animated icon plays", t, 14, "muted"))
@@ -1239,15 +1408,15 @@ class Window(QMainWindow):
         pv.addItem("Across the whole background", True)
         pv.addItem("Inside the game's icon, like the PS3", False)
         pv.setCurrentIndex(0 if s.ribbon_trailer_bg else 1)
-        pv.currentIndexChanged.connect(lambda _i: self._set("ribbon_trailer_bg", pv.currentData(), retheme=True))
+        pv.currentIndexChanged.connect(lambda _i: self._set_live(ribbon_trailer_bg=pv.currentData()))
         pr.addWidget(pv, 1)
         rb.layout().addLayout(pr)
         lay.addWidget(rb)
 
-        # -- sound picker (themes with alternatives) ----------------------------------------
+        # -- sounds: built-in choices + your own -------------------------------------------
         from . import sounds as snd
         set_name = THEMES.get(s.theme, THEMES["ribbon"]).sounds
-        if snd.VARIANTS.get(set_name):
+        if set_name:
             lay.addWidget(section(t, f"{THEMES[s.theme].name} sounds"))
             sp = W.Panel(pad=18, spacing=10)
             for ev, label_text in (("nav", "Moving around"), ("select", "Pressing a button"), ("done", "Something finished"),
@@ -1257,19 +1426,40 @@ class Window(QMainWindow):
                 lbl.setFixedWidth(190)
                 r.addWidget(lbl)
                 cb = QComboBox()
-                for opt in snd.options(set_name, ev):
-                    cb.addItem(opt)
-                cur = s.sound_choices.get(f"{set_name}:{ev}")
-                if cur and cb.findText(cur) >= 0:
-                    cb.setCurrentIndex(cb.findText(cur))
+
+                def fill(cb=cb, ev=ev):
+                    cb.blockSignals(True)
+                    cb.clear()
+                    for opt in snd.options(set_name, ev):
+                        cb.addItem(opt)
+                    cur = snd.current(set_name, ev)
+                    if cb.findText(cur) >= 0:
+                        cb.setCurrentIndex(cb.findText(cur))
+                    cb.blockSignals(False)
+
+                fill()
 
                 def changed(_i, ev=ev, cb=cb):
                     st = config.load()
                     st.sound_choices[f"{set_name}:{ev}"] = cb.currentText()
-                    config.save(st)
-                    self.settings = st
-                    snd.CHOICES = dict(st.sound_choices)
+                    self._set_live(sound_choices=st.sound_choices)
                     PLAYER.play(ev, cb.currentText(), force=True)
+
+                def add_own(_=False, ev=ev, cb=cb, fill=fill):
+                    f, _f = QFileDialog.getOpenFileName(self, "Choose a sound", str(Path.home()),
+                                                        "Audio (*.wav *.ogg *.mp3 *.flac *.opus *.m4a)")
+                    if not f:
+                        return
+                    try:
+                        name = snd.import_custom(set_name, ev, Path(f))
+                    except Exception as e:
+                        self.say(str(e), sound="error")
+                        return
+                    st = config.load()
+                    st.sound_choices[f"{set_name}:{ev}"] = name
+                    self._set_live(sound_choices=st.sound_choices)
+                    fill()
+                    PLAYER.play(ev, name, force=True)
 
                 cb.currentIndexChanged.connect(changed)
                 r.addWidget(cb, 1)
@@ -1277,8 +1467,74 @@ class Window(QMainWindow):
                 prev.setFixedWidth(46)
                 prev.clicked.connect(lambda _=False, ev=ev, cb=cb: PLAYER.play(ev, cb.currentText(), force=True))
                 r.addWidget(prev)
+                own = QPushButton("Add your own…")
+                own.clicked.connect(add_own)
+                r.addWidget(own)
                 sp.layout().addLayout(r)
+            sp.layout().addWidget(W.label("Your own sounds are copied into osmosis (the first 10 seconds) and stay "
+                                          "available for this theme.", t, 12, "muted", wrap=True))
             lay.addWidget(sp)
+
+        # -- your profile -----------------------------------------------------------------------
+        from .. import public
+        lay.addWidget(section(t, "Your profile"))
+        pf = W.Panel(pad=18, spacing=10)
+        pr = QHBoxLayout()
+        av = W.Avatar(t, public.display_name(s, self.profile), public.avatar_path(), 64)
+        pr.addWidget(av)
+        nm = QLineEdit(s.profile_name)
+        nm.setPlaceholderText(public.display_name(config.Settings(), self.profile))
+        nm.editingFinished.connect(lambda: self._set("profile_name", nm.text().strip(), reload=True))
+        pr.addWidget(nm, 1)
+
+        def pick_pic():
+            f, _f = QFileDialog.getOpenFileName(self, "Choose a picture", str(Path.home()),
+                                                "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)")
+            if not f:
+                return
+            img = QPixmap(f)
+            if img.isNull():
+                self.say("That picture couldn't be opened.", sound="error")
+                return
+            out = public.avatar_path()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            W.scaled_crop(img, QSize(256, 256)).save(str(out), "PNG")
+            QTimer.singleShot(0, self.reload)
+
+        def clear_pic():
+            public.avatar_path().unlink(missing_ok=True)
+            QTimer.singleShot(0, self.reload)
+
+        pr.addWidget(button(t, "Choose picture…", False, pick_pic))
+        pr.addWidget(button(t, "Remove", False, clear_pic))
+        pf.layout().addLayout(pr)
+        fr = QHBoxLayout()
+        fl = W.label("Profiles folder", t, 14, "muted")
+        fl.setFixedWidth(190)
+        fr.addWidget(fl)
+        fe = QLineEdit(s.profiles_dir)
+        fe.setPlaceholderText(str(public.profiles_dir(config.Settings())))
+        fe.editingFinished.connect(lambda: self._set("profiles_dir", fe.text().strip(), reload=True))
+        fr.addWidget(fe, 1)
+        fr.addWidget(button(t, "Open", False, lambda: W.open_folder(public.profiles_dir(self.settings))))
+        pf.layout().addLayout(fr)
+        pf.layout().addWidget(W.label("Your public profile (name, picture, playtime and trophy progress — nothing else) is "
+                                      "kept in this folder. Every other profile in it is shown as a friend, so share the "
+                                      "folder with Syncthing or similar and you'll all see each other.", t, 12, "muted",
+                                      wrap=True))
+        lay.addWidget(pf)
+
+        lay.addWidget(section(t, "osmosis' record"))
+        mr = W.Panel(pad=18, spacing=8)
+        ms = QCheckBox("Keep osmosis' own copy of saves too (playtime and trophies are always kept)")
+        ms.setChecked(s.mirror_saves)
+        ms.toggled.connect(lambda v: self._set_live(mirror_saves=v))
+        mr.layout().addWidget(ms)
+        mr.layout().addWidget(W.label("osmosis keeps its own record of your progress. If RPCS3 ever ends up with less "
+                                      "(a reinstall, an old copy restored), osmosis asks before putting its data back.",
+                                      t, 12, "muted", wrap=True))
+        mr.layout().addWidget(button(t, "Check now", False, self.check_mirror))
+        lay.addWidget(mr)
 
         lay.addWidget(section(t, "Locations & accounts"))
         f = W.Panel(pad=18, spacing=10)
@@ -1308,12 +1564,30 @@ class Window(QMainWindow):
         return scroll(inner)
 
     def _set_many(self, **kw):
+        self._set_live(**kw)
+
+    def _set_live(self, **kw):
+        """Save settings that don't change the layout and apply them in place -- no rebuild,
+        so the page you're on stays exactly where it was."""
         s = config.load()
         for k, v in kw.items():
             setattr(s, k, v)
         config.save(s)
         self.settings = s
-        QTimer.singleShot(0, lambda: self.apply_theme(reload=False))
+        from . import sounds as _snd
+        _snd.CHOICES = dict(s.sound_choices)
+        PLAYER.enabled = s.sounds
+        self.backdrop.set_theme(self.theme, s.ribbon_month_colors, fixed_color=s.ribbon_color,
+                                daylight=s.ribbon_daylight)
+        if getattr(self, "xmb", None) is not None:
+            try:
+                self.xmb.media_on = s.ribbon_media
+                self.xmb.preview_bg = s.ribbon_trailer_bg
+                if not s.ribbon_media:
+                    self.xmb.media.stop()
+                self.xmb.update()
+            except RuntimeError:
+                pass
 
     def _set(self, attr, value, retheme=False, reload=False):
         s = config.load()
@@ -1328,6 +1602,71 @@ class Window(QMainWindow):
     def closeEvent(self, e):
         self.watcher.release()
         super().closeEvent(e)
+
+
+class MirrorDialog(QDialog):
+    """RPCS3 has less than osmosis' record: let the user choose what wins."""
+
+    def __init__(self, win, theme: Theme, rp, diffs):
+        super().__init__(win)
+        from .. import mirror
+        self.win, self.rp, self.diffs = win, rp, diffs
+        self.setWindowTitle("osmosis has newer data")
+        self.setModal(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(10)
+        lay.addWidget(W.label("RPCS3 is behind osmosis' record", theme, 20, display=True, bold=True))
+        lay.addWidget(W.label("This can happen after reinstalling RPCS3, restoring an old copy, or another program "
+                              "changing its files. Tick what osmosis should put back into RPCS3. Anything replaced is "
+                              "kept in a safety folder.", theme, 14, "muted", wrap=True))
+        self.boxes = []
+        box = QWidget()
+        bl = QVBoxLayout(box)
+        for d in diffs:
+            cb = QCheckBox(f"{d.title} — {d.detail}")
+            cb.setChecked(True)
+            bl.addWidget(cb)
+            self.boxes.append((cb, d))
+        sc = scroll(box)
+        sc.setMinimumHeight(min(320, 40 + 32 * len(diffs)))
+        lay.addWidget(sc)
+        row = QHBoxLayout()
+        row.addWidget(button(theme, "Put osmosis' data back", True, self._restore))
+        row.addWidget(button(theme, "Keep RPCS3's", False, self._accept))
+        row.addWidget(button(theme, "Ask me later", False, self._later))
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.setMinimumWidth(640)
+
+    def _picked(self):
+        return [d for cb, d in self.boxes if cb.isChecked()], [d for cb, d in self.boxes if not cb.isChecked()]
+
+    def _restore(self):
+        from .. import mirror
+        if backup.rpcs3_running():
+            self.win.say("Close RPCS3 first.", sound="error")
+            return
+        yes, no = self._picked()
+        safety = mirror.restore(self.rp, yes) if yes else None
+        if no:
+            mirror.accept(self.rp, no)
+        self.accept()
+        self.win.say(f"Put back {len(yes)} item(s) into RPCS3." + (" RPCS3's old copies are in the safety folder." if safety else ""),
+                     ("Safety folder", lambda: W.open_folder(safety)) if safety else None)
+        QTimer.singleShot(0, self.win.reload)
+
+    def _accept(self):
+        from .. import mirror
+        mirror.accept(self.rp, self.diffs)
+        self.accept()
+        self.win.say("Kept RPCS3's data; osmosis' record now matches it.")
+
+    def _later(self):
+        snoozed = getattr(self.win, "_mirror_snoozed", set())
+        snoozed |= {(d.kind, d.key) for d in self.diffs}
+        self.win._mirror_snoozed = snoozed
+        self.reject()
 
 
 class ConflictDialog(QDialog):

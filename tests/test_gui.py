@@ -39,6 +39,11 @@ def test_theme_pages(app, tmp_path, theme, dark):
     w.open_game("BLUS30443")
     app.processEvents()
     w.grab()
+    from osmosis import public
+    d = public.build(w.profile, w.settings)
+    w.open_friend(dict(d, name="Apple"))
+    app.processEvents()
+    w.grab()
     w.close()
 
 

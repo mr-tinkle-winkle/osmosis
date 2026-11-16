@@ -56,7 +56,7 @@ class Settings:
     sounds: bool = True
     ribbon_month_colors: bool = True
     ribbon_media: bool = True               # game music (SND0) + animated icon (ICON1) when an item is held
-    ribbon_preview: str = "icon"            # where ICON1 plays: "icon" (as on the PS3) | "background" (full window)
+    ribbon_trailer_bg: bool = True          # ICON1 plays across the background (True) or inside the icon like the PS3
     ribbon_color: str = "#1d4fa3"           # used when ribbon_month_colors is off
     ribbon_daylight: bool = True            # dim by time of day, like the PS3
     sound_choices: dict = field(default_factory=dict)   # "set:event" -> variant name

@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import random
 import struct
+import threading
 import wave
 from pathlib import Path
 
@@ -27,6 +28,7 @@ def _env(n, attack=0.004, decay=0.12):
 
 
 def _tone(freqs, dur, decay=0.12, amp=0.3, attack=0.004, vibrato=0.0, square=False):
+    dur = max(dur, attack + decay * 7)          # let the decay actually finish (no cut-off)
     n = int(dur * RATE)
     env = _env(n, attack, decay)
     out = []
@@ -45,6 +47,7 @@ def _tone(freqs, dur, decay=0.12, amp=0.3, attack=0.004, vibrato=0.0, square=Fal
 
 def _noise(dur, decay=0.05, amp=0.4, lowpass=0.5, seed=1, attack=0.001):
     rnd = random.Random(seed)
+    dur = max(dur, attack + decay * 7)
     n = int(dur * RATE)
     env = _env(n, attack, decay)
     out, y = [], 0.0
@@ -66,6 +69,7 @@ def _mix(*tracks, offsets=None):
 
 
 def _glide(f0, f1, dur, decay=0.08, amp=0.3, attack=0.003):
+    dur = max(dur, attack + decay * 7)
     n = int(dur * RATE)
     env = _env(n, attack, decay)
     out, ph = [], 0.0
@@ -149,6 +153,74 @@ SETS = {
 }
 
 
+def _pluck(f, dur=1.0, amp=0.35, damp=0.996, seed=5, bright=0.5):
+    """Karplus-Strong plucked string: a natural, gently fading pluck."""
+    rnd = random.Random(seed)
+    period = max(2, int(RATE / f))
+    buf = [rnd.uniform(-1, 1) for _ in range(period)]
+    for _ in range(int(3 * (1 - bright)) + 1):      # soften the initial burst
+        buf = [(buf[i] + buf[i - 1]) * 0.5 for i in range(period)]
+    out = []
+    for i in range(int(dur * RATE)):
+        v = buf[i % period]
+        nxt = buf[(i + 1) % period]
+        buf[i % period] = damp * 0.5 * (v + nxt)
+        out.append(v * amp)
+    return out
+
+
+def _fm(fc, ratio, index, dur, decay=0.3, amp=0.25, attack=0.002):
+    """Two-operator FM: bells, glass, gongs."""
+    dur = max(dur, attack + decay * 7)
+    n = int(dur * RATE)
+    env = _env(n, attack, decay)
+    out = []
+    for i in range(n):
+        t = i / RATE
+        mod = index * env[i] * math.sin(2 * math.pi * fc * ratio * t)
+        out.append(math.sin(2 * math.pi * fc * t + mod) * env[i] * amp)
+    return out
+
+
+def _verb(x, mix=0.3, room=0.8):
+    """Small reverb (four combs + an all-pass) so sounds bloom and fade instead of stopping."""
+    src = list(x) + [0.0] * int(RATE * 0.8)
+    out = [0.0] * len(src)
+    for d, g in ((1116, room), (1188, room - 0.02), (1277, room - 0.04), (1356, room - 0.06)):
+        buf = [0.0] * d
+        idx = 0
+        for i, v in enumerate(src):
+            y = buf[idx]
+            buf[idx] = v + y * g
+            idx = (idx + 1) % d
+            out[i] += y * 0.25
+    buf, idx, wet = [0.0] * 556, 0, []
+    for v in out:
+        y = buf[idx]
+        buf[idx] = v + y * 0.5
+        wet.append(y - v * 0.5)
+        idx = (idx + 1) % 556
+    return [d * (1 - mix) + w * mix for d, w in zip(src, wet)]
+
+
+def _finish(x, fade_in=0.002, fade_out=0.08):
+    """Trim trailing silence, then fade the last stretch to zero: no clicks, no cut-offs."""
+    end = len(x)
+    while end > 0 and abs(x[end - 1]) < 1e-4:
+        end -= 1
+    x = x[:end] or [0.0]
+    fi, fo = int(fade_in * RATE), min(len(x) // 2, int(fade_out * RATE))
+    for i in range(min(fi, len(x))):
+        x[i] *= i / fi
+    for i in range(fo):
+        x[-1 - i] *= i / fo
+    return x
+
+
+def _soft(gen):
+    return lambda: _verb(gen())
+
+
 # Alternatives to pick from per event (Settings > Sounds). The default stays the one in SETS.
 VARIANTS = {
     "ribbon": {
@@ -157,9 +229,14 @@ VARIANTS = {
             "Soft tick": lambda: _mix(_noise(0.02, decay=0.004, amp=0.22, lowpass=0.55, seed=21),
                                       _tone([2900], 0.03, decay=0.008, amp=0.08)),
             "Bubble": lambda: _glide(820, 1350, 0.07, decay=0.03, amp=0.22),
-            "Pluck": lambda: _tone([1318, 2636], 0.06, decay=0.016, amp=0.2),
+            "Pluck": lambda: _pluck(1318, 0.35, amp=0.28, damp=0.992),
             "Air": lambda: _mix(_noise(0.09, decay=0.03, amp=0.12, lowpass=0.18, seed=22, attack=0.02),
                                 _tone([1976], 0.06, decay=0.02, amp=0.05)),
+            "Droplet": lambda: _glide(1900, 1100, 0.06, decay=0.025, amp=0.2),
+            "Marimba": lambda: _mix(_tone([880], 0.2, decay=0.05, amp=0.25), _tone([880 * 3.93], 0.1, decay=0.012, amp=0.08)),
+            "Felt tap": lambda: _mix(_noise(0.04, decay=0.008, amp=0.3, lowpass=0.08, seed=24), _tone([520], 0.06, decay=0.02, amp=0.12)),
+            "Crystal": lambda: _fm(2637, 3.5, 2.0, 0.2, decay=0.04, amp=0.16),
+            "Sonar": _soft(lambda: _tone([1100], 0.08, decay=0.02, amp=0.18)),
         },
         "select": {
             "Chime": SETS["ribbon"]["select"],
@@ -168,17 +245,46 @@ VARIANTS = {
             "Bell": lambda: _bell(1568, 0.7, decay=0.35, amp=0.2),
             "Rise": lambda: _mix(_glide(600, 1200, 0.16, decay=0.2, amp=0.16), _tone([1568], 0.35, decay=0.12, amp=0.12),
                                  offsets=[0, 0.12]),
+            "Glass harp": _soft(lambda: _mix(_tone([1046], 0.6, decay=0.25, amp=0.14, attack=0.03),
+                                             _tone([1568], 0.6, decay=0.25, amp=0.1, attack=0.03), offsets=[0, 0.05])),
+            "Kalimba": lambda: _mix(_pluck(784, 0.9, amp=0.3, damp=0.997, bright=0.2),
+                                    _pluck(1175, 0.9, amp=0.24, damp=0.997, seed=6, bright=0.2), offsets=[0, 0.07]),
+            "Shimmer": _soft(lambda: _sparkle(seed=9, n=5, amp=0.1)),
+            "Soft gong": _soft(lambda: _fm(392, 1.4, 3.0, 1.0, decay=0.35, amp=0.18)),
+            "Bloom": _soft(lambda: _mix(*[_tone([f], 0.7, decay=0.22, amp=0.1, attack=0.01) for f in (784, 988, 1175)])),
+            "Click + ring": lambda: _mix(_noise(0.02, decay=0.004, amp=0.25, lowpass=0.6, seed=25),
+                                         _fm(1760, 2.0, 1.2, 0.5, decay=0.12, amp=0.14), offsets=[0, 0.012]),
         },
         "done": {
             "Arpeggio": SETS["ribbon"]["done"],
             "Pad swell": lambda: _mix(*[_tone([f], 1.4, decay=0.6, amp=0.1, attack=0.18) for f in (523, 659, 784, 1047)]),
             "Sparkle": lambda: _sparkle(),
             "Two bells": lambda: _mix(_bell(1318, 0.9, amp=0.16), _bell(1976, 0.9, amp=0.14), offsets=[0, 0.12]),
+            "Fanfare": _soft(lambda: _seq([[523, 659], [659, 784], [784, 1047, 1318]], 0.11, dur=0.7, decay=0.3, amp=0.12)),
+            "Sweep + chime": lambda: _mix(_glide(300, 1500, 0.35, decay=0.25, amp=0.1, attack=0.2), _bell(1976, 0.9, amp=0.14),
+                                          offsets=[0, 0.3]),
+            "Music box": _soft(lambda: _mix(*[_pluck(f, 0.9, amp=0.22, damp=0.998, seed=i, bright=0.1)
+                                              for i, f in enumerate((1047, 1319, 1568, 2093))],
+                                            offsets=[i * 0.12 for i in range(4)])),
+            "Choir pad": _soft(lambda: _mix(*[_tone([f], 1.3, decay=0.5, amp=0.08, attack=0.25, vibrato=0.004)
+                                              for f in (440, 554, 659, 880)])),
+            "Glass cascade": _soft(lambda: _mix(*[_fm(f, 3.5, 1.5, 0.4, decay=0.1, amp=0.1) for f in (3136, 2637, 2349, 1976, 1568)],
+                                                offsets=[i * 0.06 for i in range(5)])),
+            "Soft confirm": _soft(lambda: _seq([784, 1175], 0.13, dur=0.5, decay=0.18, amp=0.15)),
         },
         "error": {
             "Two notes": SETS["ribbon"]["error"],
             "Thud": lambda: _mix(_tone([95], 0.25, decay=0.08, amp=0.4), _noise(0.06, decay=0.02, amp=0.2, lowpass=0.1)),
             "Fall": lambda: _glide(700, 330, 0.25, decay=0.12, amp=0.22),
+            "Soft buzz": lambda: _tone([180], 0.18, decay=0.06, amp=0.12, square=True),
+            "Double tap": lambda: _mix(_noise(0.04, decay=0.01, amp=0.3, lowpass=0.1, seed=26),
+                                       _noise(0.04, decay=0.01, amp=0.3, lowpass=0.1, seed=27), offsets=[0, 0.11]),
+            "Low bell": _soft(lambda: _bell(392, 0.8, decay=0.3, amp=0.18)),
+            "Detuned": lambda: _tone([330, 349], 0.4, decay=0.15, amp=0.2),
+            "Drop": lambda: _mix(_glide(500, 160, 0.2, decay=0.1, amp=0.22), _noise(0.05, decay=0.02, amp=0.1, lowpass=0.1)),
+            "Wobble": lambda: _tone([260], 0.4, decay=0.15, amp=0.2, vibrato=0.04),
+            "Hollow knock": lambda: _mix(_fm(220, 1.5, 2.5, 0.25, decay=0.05, amp=0.25),
+                                         _noise(0.03, decay=0.008, amp=0.15, lowpass=0.2, seed=28)),
         },
     },
 }
@@ -196,17 +302,19 @@ def sound_file(set_name: str, event: str, variant: str | None = None) -> Path | 
     if not gen:
         return None
     slug = "".join(c for c in (variant or "default").lower() if c.isalnum())
-    p = config.data_dir() / "sounds" / "v2" / set_name / f"{event}-{slug}.wav"
+    p = config.data_dir() / "sounds" / "v3" / set_name / f"{event}-{slug}.wav"
     if not p.is_file():
         p.parent.mkdir(parents=True, exist_ok=True)
-        samples = gen()
+        samples = _finish(list(gen()))
         peak = max(1e-6, max(abs(s) for s in samples))
         scale = min(1.0, 0.9 / peak)
-        with wave.open(str(p), "wb") as w:
+        tmp = p.with_suffix(f".{threading.get_ident()}.tmp")
+        with wave.open(str(tmp), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(RATE)
             w.writeframes(b"".join(struct.pack("<h", int(max(-1, min(1, s * scale)) * 32000)) for s in samples))
+        tmp.replace(p)
     return p
 
 
@@ -233,6 +341,20 @@ class Player:
         except Exception:
             self._qt = False
         self.last_error = ""
+
+    def warm(self):
+        """Synthesise the current theme's chosen sounds ahead of time (some take a few
+        hundred ms), so the first click isn't late."""
+        name = self.set_name
+
+        def work():
+            for ev in ("nav", "select", "done", "error"):
+                try:
+                    sound_file(name, ev)
+                except Exception:
+                    pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def play(self, event: str, variant: str | None = None, force: bool = False):
         import subprocess

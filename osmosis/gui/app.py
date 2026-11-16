@@ -267,6 +267,8 @@ class Window(QMainWindow):
         _snd.CHOICES = dict(self.settings.sound_choices)
         PLAYER.enabled = self.settings.sounds
         PLAYER.set_name = t.sounds
+        if self.settings.sounds:
+            PLAYER.warm()
         if reload:
             self.reload()
         else:
@@ -1023,7 +1025,7 @@ class Window(QMainWindow):
             "then paste the token RPCN emails you. osmosis can't do this one — it needs your email.", manual=True)
         ref = lbp.find_refresher(self.settings)
         ref_btn = button(t, "Open Refresher" if ref else "Get Refresher", False,
-                         (lambda: subprocess.Popen([ref], start_new_session=True)) if ref else
+                         (lambda: self._run_refresher(ref)) if ref else
                          (lambda: open_url(lbp.REFRESHER_RELEASES)))
         row(pw_ok and bool(patched), "4. Patch the game with Refresher (adds Patchwork)",
             ("Patched: " + ", ".join(g.serial for g in patched) + "." if patched and pw_ok else
@@ -1088,6 +1090,21 @@ class Window(QMainWindow):
         lay.addLayout(links)
         lay.addStretch(1)
         return scroll(inner)
+
+    def _run_refresher(self, path):
+        from .. import lbp
+        cmd, env = lbp.refresher_command(path)
+        log = open(config.data_dir() / "refresher.log", "w")
+        try:
+            proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as e:
+            self.say(f"Couldn't start Refresher: {e}", sound="error")
+            return
+
+        def check():
+            if proc.poll() not in (None, 0):
+                self.say("Refresher closed straight away. Details: ~/.local/share/osmosis/refresher.log", sound="error")
+        QTimer.singleShot(4000, check)
 
     def _lbp_network(self):
         from .. import lbp
@@ -1219,10 +1236,10 @@ class Window(QMainWindow):
         pr = QHBoxLayout()
         pr.addWidget(W.label("Animated icon plays", t, 14, "muted"))
         pv = QComboBox()
-        pv.addItem("In the icon, like the PS3", "icon")
-        pv.addItem("Across the whole background", "background")
-        pv.setCurrentIndex(0 if s.ribbon_preview != "background" else 1)
-        pv.currentIndexChanged.connect(lambda _i: self._set("ribbon_preview", pv.currentData(), retheme=True))
+        pv.addItem("Across the whole background", True)
+        pv.addItem("Inside the game's icon, like the PS3", False)
+        pv.setCurrentIndex(0 if s.ribbon_trailer_bg else 1)
+        pv.currentIndexChanged.connect(lambda _i: self._set("ribbon_trailer_bg", pv.currentData(), retheme=True))
         pr.addWidget(pv, 1)
         rb.layout().addLayout(pr)
         lay.addWidget(rb)

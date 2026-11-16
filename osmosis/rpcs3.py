@@ -86,13 +86,33 @@ class Game:
 
     @property
     def music(self) -> Path | None:
-        """SND0.AT3: the music the PS3 menu plays while the game is highlighted."""
-        return self._asset("SND0.AT3")
+        """SND0.AT3 (or a language variant, SND0_xx.AT3): the music the PS3 menu plays
+        while the game is highlighted."""
+        return self._find_media("SND0", ".AT3")
 
     @property
     def preview(self) -> Path | None:
-        """ICON1.PAM: the animated icon / b-roll the PS3 menu shows."""
-        return self._asset("ICON1.PAM")
+        """ICON1.PAM (or ICON1_xx.PAM): the animated icon / mini trailer the PS3 menu shows.
+        Not every game has one."""
+        return self._find_media("ICON1", ".PAM")
+
+    def _find_media(self, stem: str, ext: str) -> Path | None:
+        dirs = [d for d in (self.sfo_dir, self.update_dir) if d and d.is_dir()]
+        for d in dirs:
+            exact = [f for f in d.iterdir() if f.is_file() and f.name.upper() == stem + ext]
+            if exact:
+                return exact[0]
+        for d in dirs:
+            for f in sorted(d.iterdir()):
+                n = f.name.upper()
+                if f.is_file() and n.startswith(stem + "_") and n.endswith(ext):
+                    return f
+        return None
+
+    @property
+    def update_dir(self) -> Path | None:
+        """dev_hdd0/game/<serial> for disc games (where their updates live)."""
+        return getattr(self, "_update_dir", None)
 
     def _asset(self, name: str) -> Path | None:
         if self.sfo_dir:
@@ -229,6 +249,9 @@ class Rpcs3:
                 g.np_comm_id = _np_comm_id(d)
                 found[serial] = g
 
+        for g in found.values():
+            if g.kind == "disc":
+                g._update_dir = self.dev_hdd0 / "game" / g.serial
         times = self.playtimes()
         last = self.last_played()
         for g in found.values():

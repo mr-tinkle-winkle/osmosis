@@ -104,3 +104,23 @@ def test_pamf_and_at3_parsers():
     riff = b"RIFF" + struct.pack("<I", len(riff_body)) + riff_body
     l = at3_loop(riff)
     assert (l.start_ms, l.end_ms) == (1000, 10000)
+
+
+def test_refresher_command(tmp_path, monkeypatch):
+    app = tmp_path / "Refresher-linux-x64.appimage"
+    app.write_bytes(b"x")
+    monkeypatch.delenv("OSMOSIS_ICU_LIB", raising=False)
+    monkeypatch.setattr(lbp.shutil, "which", lambda n: "/run/current-system/sw/bin/appimage-run" if n == "appimage-run" else None)
+    cmd, env = lbp.refresher_command(str(app))
+    assert cmd == ["/run/current-system/sw/bin/appimage-run", str(app)]
+    assert env["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] == "1"
+    assert app.stat().st_mode & 0o111
+    monkeypatch.setenv("OSMOSIS_ICU_LIB", "/nix/store/icu/lib")
+    _cmd, env = lbp.refresher_command(str(app))
+    assert env["LD_LIBRARY_PATH"].startswith("/nix/store/icu/lib")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "Downloads").mkdir()
+    app2 = tmp_path / "Downloads" / "Refresher-linux-x64.appimage"
+    app2.write_bytes(b"x")
+    from osmosis import config
+    assert lbp.find_refresher(config.Settings()) == str(app2)

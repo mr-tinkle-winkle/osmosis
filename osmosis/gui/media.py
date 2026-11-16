@@ -184,6 +184,56 @@ def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
     return music, video, loop
 
 
+class _Track(QObject):
+    """One music player that can fade in and out on its own, so the previous game's
+    music fades away while the next one fades up -- never a hard cut."""
+
+    def __init__(self, path: Path, loop: Loop | None, parent):
+        super().__init__(parent)
+        self.loop = loop
+        self.out = QAudioOutput(self)
+        self.out.setVolume(0.0)
+        self.player = QMediaPlayer(self)
+        self.player.setAudioOutput(self.out)
+        self.player.mediaStatusChanged.connect(self._status)
+        self.player.setSource(QUrl.fromLocalFile(str(path)))
+        self.target = 0.0
+        self.step = 0.04
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(25)
+        self.dead = False
+
+    def fade_to(self, v: float, seconds: float):
+        self.target = v
+        self.step = max(0.005, abs(v - self.out.volume()) / max(1, seconds / 0.025))
+
+    def _tick(self):
+        # volume ramp
+        v = self.out.volume()
+        if abs(v - self.target) > 1e-3:
+            v = min(self.target, v + self.step) if v < self.target else max(self.target, v - self.step)
+            self.out.setVolume(v)
+        elif self.target == 0.0 and self.dead:
+            self._timer.stop()
+            self.player.stop()
+            self.deleteLater()
+            return
+        # loop region, checked every 25 ms (position signals can be too coarse)
+        l = self.loop
+        if l and self.player.position() >= l.end_ms - 20:
+            self.player.setPosition(l.start_ms)
+
+    def _status(self, status):
+        if status == QMediaPlayer.EndOfMedia and not self.dead:
+            self.player.setPosition(self.loop.start_ms if self.loop else 0)
+            self.player.play()
+
+    def retire(self, seconds=0.45):
+        self.dead = True
+        self.fade_to(0.0, seconds)
+
+
 class GameMedia(QObject):
     """One game's music + animated icon. `frame` is the latest video frame (or None)."""
     ready = Signal(object, object, object)        # (music, video, loop), from the worker thread
@@ -194,12 +244,10 @@ class GameMedia(QObject):
         self.frame: QImage | None = None
         self.serial = None
         self._gen = 0
-        self._loop: Loop | None = None
         self.ready.connect(self._start, Qt.QueuedConnection)
         self._made = False
-        self._fade = QTimer(self)
-        self._fade.timeout.connect(self._fade_step)
-        self._target = 0.0
+        self._track: _Track | None = None
+        self._target = 0.8
 
     def _ensure(self) -> bool:
         """Players are created on first use, never at startup: a broken audio stack
@@ -209,12 +257,6 @@ class GameMedia(QObject):
             return False
         if not self._made:
             self._made = True
-            self._audio_out = QAudioOutput(self)
-            self._audio_out.setVolume(0.0)
-            self._music = QMediaPlayer(self)
-            self._music.setAudioOutput(self._audio_out)
-            self._music.positionChanged.connect(self._check_loop)
-            self._music.mediaStatusChanged.connect(self._music_status)
             self._video = QMediaPlayer(self)
             self._sink = QVideoSink(self)
             self._video.setVideoSink(self._sink)
@@ -242,34 +284,13 @@ class GameMedia(QObject):
     def _start(self, music, video, loop):
         if not self._made or self.serial is None:
             return
-        self._loop = loop
         if music:
-            self._music.setLoops(1)
-            self._music.setSource(QUrl.fromLocalFile(str(music)))
-            self._audio_out.setVolume(0.0)
-            self._music.play()
-            self._fade.start(40)
+            self._track = _Track(music, loop, self)
+            self._track.player.play()
+            self._track.fade_to(self._target, 1.2)
         if video:
             self._video.setSource(QUrl.fromLocalFile(str(video)))
             self._video.play()
-
-    def _check_loop(self, pos: int):
-        l = self._loop
-        if l and pos >= l.end_ms - 15:
-            self._music.setPosition(l.start_ms)
-
-    def _music_status(self, status):
-        if status == QMediaPlayer.EndOfMedia and self.serial is not None:
-            self._music.setPosition(self._loop.start_ms if self._loop else 0)
-            self._music.play()
-
-    def _fade_step(self):
-        v = self._audio_out.volume()
-        if v < self._target - 0.02:
-            self._audio_out.setVolume(min(self._target, v + 0.04))
-        else:
-            self._audio_out.setVolume(self._target)
-            self._fade.stop()
 
     def _on_frame(self, f):
         img = f.toImage()
@@ -281,11 +302,10 @@ class GameMedia(QObject):
         self._gen += 1
         self.serial = None
         self.frame = None
-        self._loop = None
-        self._fade.stop()
+        if self._track is not None:
+            self._track.retire()
+            self._track = None
         if self._made:
-            self._music.stop()
             self._video.stop()
-            self._music.setSource(QUrl())
             self._video.setSource(QUrl())
         self.frame_changed.emit()

@@ -250,7 +250,35 @@ def find_refresher(settings: config.Settings) -> str | None:
             return w
     for c in (Path.home() / "Applications", Path.home() / ".local/bin", Path.home() / "Downloads"):
         if c.is_dir():
-            for f in c.glob("Refresher*"):
-                if f.is_file() and f.stat().st_mode & 0o111:
+            for f in sorted(c.glob("Refresher*"), key=lambda x: x.stat().st_mtime, reverse=True):
+                if f.is_file() and (f.suffix.lower() == ".appimage" or f.stat().st_mode & 0o111):
                     return str(f)
     return None
+
+
+def refresher_command(path: str) -> tuple[list[str], dict]:
+    """How to start Refresher on NixOS.
+
+    * It's a .NET app, and .NET aborts at start-up unless it finds ICU (libicu). The
+      osmosis package points OSMOSIS_ICU_LIB at nixpkgs' ICU; if that's missing, .NET's
+      "invariant globalization" mode is switched on instead (Refresher doesn't need
+      localised formatting).
+    * NixOS can't run most AppImages directly, so .appimage files go through appimage-run.
+    """
+    import os
+    env = dict(os.environ)
+    icu = env.get("OSMOSIS_ICU_LIB", "")
+    if icu:
+        env["LD_LIBRARY_PATH"] = icu + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+    else:
+        env["DOTNET_SYSTEM_GLOBALIZATION_INVARIANT"] = "1"
+    p = Path(path)
+    try:
+        if not p.stat().st_mode & 0o111:
+            p.chmod(p.stat().st_mode | 0o755)
+    except OSError:
+        pass
+    runner = shutil.which("appimage-run")
+    if p.suffix.lower() == ".appimage" and runner:
+        return [runner, str(p)], env
+    return [str(p)], env

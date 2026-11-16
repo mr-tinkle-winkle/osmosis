@@ -48,8 +48,10 @@
           postFixup = ''
             # pw-play/paplay play theme sounds; ffmpeg converts the PS3's menu music (ATRAC3)
             # and preview videos (PAMF) for Ribbon.
+            # appimage-run + ICU: Refresher (LBP patcher) ships as a .NET AppImage.
             wrapQtApp "$out/bin/osmosis" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.pipewire pkgs.pulseaudio pkgs.ffmpeg ]}
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.pipewire pkgs.pulseaudio pkgs.ffmpeg pkgs.appimage-run ]} \
+              --set-default OSMOSIS_ICU_LIB ${pkgs.lib.makeLibraryPath [ pkgs.icu ]}
           '';
 
           meta = {

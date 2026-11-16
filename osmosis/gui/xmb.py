@@ -1,9 +1,9 @@
 """Ribbon's library: a vertical list of games in the style of the PS3 menu.
 
 The highlighted game sits large at a fixed spot; the rest slide past it, smaller and
-dimmer. Keys, wheel or clicks move the highlight; holding on a game (keyboard focus or
-the mouse resting on it) for a moment brings in its PS3 background art (PIC1), starts
-its menu music (SND0) and swaps the icon for its animated preview (ICON1).
+dimmer. Keys, wheel or clicks move the highlight (hovering does nothing); staying on a
+game for a moment brings in its PS3 background art (PIC1), starts its menu music (SND0)
+and plays its animated icon / mini trailer (ICON1) if it has one.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class XmbList(QWidget):
         self.theme = theme
         self.backdrop = backdrop
         self.media_on = settings.ribbon_media
-        self.preview_bg = settings.ribbon_preview == "background"
+        self.preview_bg = settings.ribbon_trailer_bg
         self.index = 0
         self.offset = 0.0
         self.setFocusPolicy(Qt.StrongFocus)
@@ -45,12 +45,8 @@ class XmbList(QWidget):
         self._dwell = QTimer(self)
         self._dwell.setSingleShot(True)
         self._dwell.timeout.connect(self._activate)
-        self._hover_idx = None
-        self._anchor = None            # mouse position the current hover started from
-        self._moved_at = 0.0           # when the list last moved under the pointer
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setSingleShot(True)
-        self._hover_timer.timeout.connect(self._hover_select)
+        self._wheel_acc = 0
+        self._wheel_last = 0.0
         self.media = GameMedia(self)
         self.media.frame_changed.connect(self.update)
         self._icons: dict[str, QPixmap] = {}
@@ -77,11 +73,6 @@ class XmbList(QWidget):
         self.index = i
         if sound:
             PLAYER.play("nav")
-        import time
-        self._moved_at = time.monotonic()
-        self._hover_idx = None
-        self._hover_timer.stop()
-        self._anchor = None
         self._anim.stop()
         self._anim.setStartValue(self.offset)
         self._anim.setEndValue(float(i))
@@ -135,9 +126,22 @@ class XmbList(QWidget):
             super().keyPressEvent(e)
 
     def wheelEvent(self, e):
-        d = e.angleDelta().y()
-        if d:
-            self.select(self.index + (1 if d < 0 else -1))
+        """One step per full wheel notch. Touchpads and smooth-scrolling wheels send a
+        stream of tiny deltas (and keep sending after you let go); those are added up
+        instead of each moving the list."""
+        e.accept()
+        self._wheel_step(e.angleDelta().y(), e.phase() == Qt.ScrollMomentum)
+
+    def _wheel_step(self, dy: int, momentum: bool = False):
+        import time
+        if momentum:                             # touchpad coasting after release
+            return
+        self._wheel_acc += dy
+        now = time.monotonic()
+        if abs(self._wheel_acc) >= 120 and now - self._wheel_last > 0.09:
+            self.select(self.index + (1 if self._wheel_acc < 0 else -1))
+            self._wheel_acc = 0
+            self._wheel_last = now
 
     def _hit(self, pos) -> int | None:
         for i, r in self._rects:
@@ -146,38 +150,8 @@ class XmbList(QWidget):
         return None
 
     def mouseMoveEvent(self, e):
-        """Resting the pointer on a game selects it -- but only after a real, deliberate
-        move. Mice report tiny jitters while still, and the list slides under the pointer
-        after every selection; neither may count, or the list scrolls by itself."""
-        self._pointer_moved(e.position())
-
-    def _pointer_moved(self, pos):
-        import time
-        i = self._hit(pos)
-        self.setCursor(Qt.PointingHandCursor if i is not None else Qt.ArrowCursor)
-        if time.monotonic() - self._moved_at < 0.6:      # list still settling under the pointer
-            self._anchor = pos
-            return
-        if self._anchor is not None and (pos - self._anchor).manhattanLength() < 12:
-            return                                        # jitter, not a move
-        self._anchor = pos
-        if i != self._hover_idx:
-            self._hover_idx = i
-            self._hover_timer.stop()
-            if i is not None and i != self.index:
-                self._hover_timer.start(DWELL_MS)
-
-    def _hover_select(self):
-        from PySide6.QtGui import QCursor
-        if self._hover_idx is None:
-            return
-        # still over the same game, from where the hover began?
-        if self._hit(self.mapFromGlobal(QCursor.pos()).toPointF()) == self._hover_idx:
-            self.select(self._hover_idx)
-
-    def leaveEvent(self, e):
-        self._hover_idx = None
-        self._hover_timer.stop()
+        # Hovering never changes anything; it only shows that a game can be clicked.
+        self.setCursor(Qt.PointingHandCursor if self._hit(e.position()) is not None else Qt.ArrowCursor)
 
     def mousePressEvent(self, e):
         i = self._hit(e.position())

@@ -77,33 +77,29 @@ def test_background_results_arrive_on_gui_thread(app):
         time.sleep(0.01)
 
 
-def test_xmb_ignores_jitter(app, tmp_path):
-    """Regression: the PS3-style list must not keep scrolling by itself under a still mouse."""
+def test_xmb_only_moves_on_purpose(app, tmp_path):
+    """Regression: the PS3-style list must never move by itself: hovering does nothing and
+    smooth-scroll/touchpad deltas add up to whole notches instead of one step each."""
     import time
-    from PySide6.QtCore import QPointF, Qt, QEvent
-    from PySide6.QtGui import QMouseEvent
     from osmosis.gui.backdrop import Backdrop
     from osmosis.gui.themes import resolve
     from osmosis.gui.xmb import XmbList
     from osmosis.library import load_profile
     cfg = make_rpcs3(tmp_path)
     s = config.Settings(rpcs3_config_dir=str(cfg))
-    entries = load_profile(s).entries
-    w = XmbList(entries, resolve("ribbon", True), Backdrop(), s)
+    w = XmbList(load_profile(s).entries, resolve("ribbon", True), Backdrop(), s)
     w.resize(1200, 800)
     w.show()
     app.processEvents()
-    w.repaint()
-    w.select(1)
-    start = w.index
-    # the list just moved under a still pointer; jitter of a pixel or two for 2 s
-    r = w._rects[0][1].center() if w._rects else QPointF(400, 300)
-    t_end = time.time() + 2.0
-    k = 0
-    while time.time() < t_end:
-        p = r + QPointF(k % 2, 0)
-        w._pointer_moved(p)
-        app.processEvents()
-        time.sleep(0.02)
-        k += 1
-    assert w.index == start
+    for _ in range(7):                 # 7 x 15 = 105 < one notch
+        w._wheel_step(-15)
+    assert w.index == 0
+    w._wheel_step(-15)                 # 120: one notch
+    assert w.index == 1
+    for _ in range(30):                # coasting after the finger lifted
+        w._wheel_step(-120, momentum=True)
+    assert w.index == 1
+    time.sleep(0.1)
+    w._wheel_step(120)
+    assert w.index == 0
+    w.close()

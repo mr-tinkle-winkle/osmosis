@@ -70,6 +70,9 @@ class Game:
     playtime_ms: int = 0
     last_played: datetime | None = None
     sfo: dict = field(default_factory=dict)
+    # Other folders that may hold the menu files: the disc folder itself, an
+    # extracted .iso, data/install folders under dev_hdd0/game named after the serial.
+    extra_dirs: list = field(default_factory=list)
 
     @property
     def icon(self) -> Path | None:
@@ -96,8 +99,20 @@ class Game:
         Not every game has one."""
         return self._find_media("ICON1", ".PAM")
 
+    @property
+    def media_dirs(self) -> list[Path]:
+        """Every folder searched for SND0/ICON1, best first."""
+        out: list[Path] = []
+        for d in (self.sfo_dir, self.update_dir, *self.extra_dirs):
+            if d and d not in out and d.is_dir():
+                out.append(d)
+        return out
+
     def _find_media(self, stem: str, ext: str) -> Path | None:
-        dirs = [d for d in (self.sfo_dir, self.update_dir) if d and d.is_dir()]
+        try:
+            dirs = self.media_dirs
+        except OSError:
+            return None
         for d in dirs:
             exact = [f for f in d.iterdir() if f.is_file() and f.name.upper() == stem + ext]
             if exact:
@@ -115,11 +130,7 @@ class Game:
         return getattr(self, "_update_dir", None)
 
     def _asset(self, name: str) -> Path | None:
-        if self.sfo_dir:
-            p = self.sfo_dir / name
-            if p.is_file():
-                return p
-        return None
+        return _ci_file(self.sfo_dir, name)
 
 
 class Rpcs3:
@@ -220,10 +231,14 @@ class Rpcs3:
                 continue
             p = Path(str(path)).expanduser()
             if p.suffix.lower() == ".iso":
-                found[serial] = Game(serial, serial, p, "iso")
+                g = Game(serial, serial, p, "iso", _iso_dir(serial, p))
+                _fill_from_sfo(g)
+                found[serial] = g
                 continue
             sfo_dir = _sfo_dir_for(p)
             g = Game(serial, serial, p, "disc", sfo_dir)
+            if p.is_dir() and p != sfo_dir:
+                g.extra_dirs.append(p)
             _fill_from_sfo(g)
             found[serial] = g
 
@@ -249,9 +264,16 @@ class Rpcs3:
                 g.np_comm_id = _np_comm_id(d)
                 found[serial] = g
 
+        extra: dict[str, list[Path]] = {}
+        if game_root.is_dir():
+            for d in sorted(game_root.iterdir()):
+                # e.g. BCUS98119_INSTALL / BCUS98119DATA: the game's own HDD folders.
+                if d.is_dir() and len(d.name) > 9 and SERIAL_RE.match(d.name[:9]):
+                    extra.setdefault(d.name[:9], []).append(d)
         for g in found.values():
-            if g.kind == "disc":
+            if g.kind in ("disc", "iso"):
                 g._update_dir = self.dev_hdd0 / "game" / g.serial
+            g.extra_dirs.extend(extra.get(g.serial, []))
         times = self.playtimes()
         last = self.last_played()
         for g in found.values():
@@ -260,11 +282,45 @@ class Rpcs3:
         return sorted(found.values(), key=lambda g: g.title.lower())
 
 
-def _sfo_dir_for(game_path: Path) -> Path | None:
-    for c in (game_path / "PS3_GAME", game_path):
-        if (c / "PARAM.SFO").is_file():
-            return c
+def _ci_file(d: Path | None, name: str) -> Path | None:
+    """d/name, matching the name in any letter case."""
+    if not d:
+        return None
+    p = d / name
+    if p.is_file():
+        return p
+    try:
+        for f in d.iterdir():
+            if f.name.upper() == name.upper() and f.is_file():
+                return f
+    except OSError:
+        pass
     return None
+
+
+def _sfo_dir_for(game_path: Path) -> Path | None:
+    cands = [game_path / "PS3_GAME", game_path]
+    try:  # some dumps use a lowercase ps3_game / param.sfo
+        cands[1:1] = [d for d in game_path.iterdir() if d.is_dir() and d.name.upper() == "PS3_GAME"]
+    except OSError:
+        pass
+    for c in cands:
+        try:
+            if any(f.name.upper() == "PARAM.SFO" and f.is_file() for f in c.iterdir()):
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def _iso_dir(serial: str, iso: Path) -> Path | None:
+    """The image's menu files, copied into osmosis' cache (see iso.py)."""
+    from .config import data_dir
+    from .iso import IsoError, extract_menu_files
+    try:
+        return extract_menu_files(iso, data_dir() / "iso" / serial)
+    except (IsoError, OSError):
+        return None
 
 
 def _np_comm_id(sfo_dir: Path) -> str | None:
@@ -280,7 +336,7 @@ def _fill_from_sfo(g: Game) -> None:
     if not g.sfo_dir:
         return
     try:
-        g.sfo = read_sfo(g.sfo_dir / "PARAM.SFO")
+        g.sfo = read_sfo(_ci_file(g.sfo_dir, "PARAM.SFO") or g.sfo_dir / "PARAM.SFO")
     except (SfoError, OSError):
         return
     g.title = str(g.sfo.get("TITLE") or g.serial)

@@ -126,6 +126,29 @@ def _ff(args: list[str]) -> bool:
     return r.returncode == 0
 
 
+def _where(game, ext: str) -> str:
+    """What was searched, plus any file of that type close by, so a missing menu
+    video can be tracked down from the log."""
+    try:
+        dirs = game.media_dirs
+    except Exception:
+        dirs = []
+    lines = [f"{game.kind} game at {game.path}; searched: " + (", ".join(map(str, dirs)) or "nothing")]
+    near = []
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                if f.is_file() and f.suffix.upper() == ext:
+                    near.append(str(f))
+                elif f.is_dir():
+                    near += [str(x) for x in f.iterdir() if x.is_file() and x.suffix.upper() == ext][:5]
+        except OSError:
+            pass
+    if near:
+        lines.append(f"other {ext} files nearby (not menu files): " + ", ".join(near[:8]))
+    return "\n    ".join(lines)
+
+
 def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
     """(music, video, loop) as playable files, converting on first use."""
     ff = shutil.which("ffmpeg")
@@ -148,7 +171,7 @@ def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
         music = out if out.is_file() else None
         log(f"{game.serial}: SND0 -> {'ok' if music else 'FAILED'}; loop {loop}")
     else:
-        log(f"{game.serial}: no SND0.AT3 in {game.sfo_dir}")
+        log(f"{game.serial}: no SND0.AT3. " + _where(game, ".AT3"))
 
     if game.preview:
         out = d / "preview.mp4"
@@ -171,7 +194,7 @@ def convert(game) -> tuple[Path | None, Path | None, Loop | None]:
         video = out if out.is_file() else None
         log(f"{game.serial}: ICON1 -> {'ok' if video else 'FAILED'}")
     else:
-        log(f"{game.serial}: no ICON1.PAM in {game.sfo_dir}")
+        log(f"{game.serial}: no ICON1.PAM. " + _where(game, ".PAM"))
     return music, video, loop
 
 
